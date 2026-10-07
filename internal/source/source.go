@@ -55,6 +55,12 @@ func Open(alias, url string) (*Source, error) {
 	return &Source{Alias: alias, URL: url, dir: dir}, nil
 }
 
+// Check returns an error when url is not a git repository git can reach.
+func Check(url string) error {
+	_, err := runGit("ls-remote", "--quiet", "--", url)
+	return err
+}
+
 // Fetch updates the cached clone from the remote.
 func (s *Source) Fetch() error {
 	_, err := runGit("-C", s.dir, "fetch", "--quiet", "--prune", "--tags", "origin", "+refs/heads/*:refs/heads/*")

@@ -14,6 +14,7 @@ import (
 
 	"github.com/anthony-cordani/kitt/internal/install"
 	"github.com/anthony-cordani/kitt/internal/manifest"
+	"github.com/anthony-cordani/kitt/internal/source"
 	"github.com/anthony-cordani/kitt/internal/templates"
 )
 
@@ -28,6 +29,9 @@ type Options struct {
 func Init(opts Options) error {
 	if opts.Out == nil {
 		opts.Out = io.Discard
+	}
+	if err := checkSources(opts.Sources); err != nil {
+		return err
 	}
 	if err := initManifest(opts); err != nil {
 		return err
@@ -50,6 +54,21 @@ func Init(opts Options) error {
 	}
 	if createdAgents {
 		fmt.Fprintln(opts.Out, "next: open your AI assistant in this project, it will run the kitt-bootstrap skill")
+	}
+	return nil
+}
+
+// checkSources rejects a repository URL git cannot reach, before anything is written.
+func checkSources(sources map[string]string) error {
+	aliases := make([]string, 0, len(sources))
+	for alias := range sources {
+		aliases = append(aliases, alias)
+	}
+	sort.Strings(aliases)
+	for _, alias := range aliases {
+		if err := source.Check(sources[alias]); err != nil {
+			return fmt.Errorf("source %s: %s is not a reachable git repository", alias, sources[alias])
+		}
 	}
 	return nil
 }

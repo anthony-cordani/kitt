@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/anthony-cordani/kitt/internal/scaffold"
+	"github.com/anthony-cordani/kitt/internal/source"
 )
 
 // sourceFlags collects repeated --source alias=url flags.
@@ -72,16 +73,33 @@ func askSources(in *bufio.Reader, out io.Writer, sources sourceFlags) error {
 		if err != nil || url == "" {
 			return err
 		}
-		alias, err := prompt(in, out, "Alias [default]: ")
+		if err := source.Check(url); err != nil {
+			fmt.Fprintln(out, "  not a reachable git repository, check the URL and your access")
+			continue
+		}
+		name := defaultAlias(url)
+		alias, err := prompt(in, out, fmt.Sprintf("Short name for this repository [%s]: ", name))
 		if err != nil {
 			return err
 		}
 		if alias == "" {
-			alias = "default"
+			alias = name
 		}
 		sources[alias] = url
 		question = "Another repository URL (empty to finish): "
 	}
+}
+
+// defaultAlias derives a short name from the last element of a repository URL.
+func defaultAlias(url string) string {
+	name := strings.TrimSuffix(strings.TrimRight(url, "/"), ".git")
+	if i := strings.LastIndexAny(name, "/:"); i >= 0 {
+		name = name[i+1:]
+	}
+	if name == "" {
+		return "default"
+	}
+	return name
 }
 
 func prompt(in *bufio.Reader, out io.Writer, question string) (string, error) {
