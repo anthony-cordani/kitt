@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 
@@ -44,6 +45,9 @@ func Restore(opts Options) error {
 	out := outputOf(opts.Out)
 	dirty := false
 	for _, name := range sortedNames(m.Skills) {
+		if !p.global && strings.HasPrefix(name, "kitt-") {
+			return fmt.Errorf("skill names starting with kitt- are reserved")
+		}
 		sk := m.Skills[name]
 		if sk == nil {
 			return fmt.Errorf("skill %s: nil manifest entry", name)
@@ -100,18 +104,8 @@ func Restore(opts Options) error {
 		}
 		fmt.Fprintf(out, "installed %s %s\n", name, versionLabel(sk.Resolved.Version, sk.Resolved.Commit))
 	}
-	if !p.global {
-		if err := pruneSkills(p.skillsDir, m.Skills, out); err != nil {
-			return err
-		}
-	}
-	if err := syncLinks(p, m, out); err != nil {
+	if err := finish(p, sortedNames(m.Skills), true, out); err != nil {
 		return err
-	}
-	if !p.global {
-		if err := writeGitignore(p.root, sortedNames(m.Skills)); err != nil {
-			return err
-		}
 	}
 	if dirty {
 		if err := m.Save(p.manifest); err != nil {
@@ -151,6 +145,9 @@ func Add(opts Options, ref string) error {
 	if err := skill.ValidName(name); err != nil {
 		return err
 	}
+	if !p.global && strings.HasPrefix(name, "kitt-") {
+		return fmt.Errorf("skill names starting with kitt- are reserved")
+	}
 	src, err := openFetch(alias, url)
 	if err != nil {
 		return err
@@ -181,13 +178,8 @@ func Add(opts Options, ref string) error {
 	}
 	out := outputOf(opts.Out)
 	fmt.Fprintf(out, "added %s %s\n", name, versionLabel(resolved.Version, resolved.Commit))
-	if err := syncLinks(p, m, out); err != nil {
+	if err := finish(p, sortedNames(m.Skills), false, out); err != nil {
 		return err
-	}
-	if !p.global {
-		if err := writeGitignore(p.root, sortedNames(m.Skills)); err != nil {
-			return err
-		}
 	}
 	return nil
 }
@@ -359,10 +351,9 @@ func outputOf(w io.Writer) io.Writer {
 	return w
 }
 
-// syncLinks makes .claude/skills point at each manifest skill.
+// syncLinks makes .claude/skills point at each managed skill.
 // Project installs also drop links kitt previously created for skills that are gone.
-func syncLinks(p paths, m *manifest.Manifest, out io.Writer) error {
-	names := sortedNames(m.Skills)
+func syncLinks(p paths, names []string, out io.Writer) error {
 	if len(names) > 0 {
 		if err := os.MkdirAll(p.claudeDir, 0o755); err != nil {
 			return fmt.Errorf("create claude skills dir: %w", err)
@@ -376,7 +367,7 @@ func syncLinks(p paths, m *manifest.Manifest, out io.Writer) error {
 	if p.global {
 		return nil
 	}
-	return pruneLinks(p, m.Skills)
+	return pruneLinks(p, names)
 }
 
 func ensureLink(p paths, name string, out io.Writer) error {
@@ -432,7 +423,7 @@ func symlinkTarget(p paths, name string) (string, error) {
 	return "../../.agents/skills/" + name, nil
 }
 
-func pruneLinks(p paths, skills map[string]*manifest.Skill) error {
+func pruneLinks(p paths, names []string) error {
 	entries, err := os.ReadDir(p.claudeDir)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -446,7 +437,7 @@ func pruneLinks(p paths, skills map[string]*manifest.Skill) error {
 	}
 	for _, ent := range entries {
 		name := ent.Name()
-		if _, ok := skills[name]; ok {
+		if slices.Contains(names, name) {
 			continue
 		}
 		link := filepath.Join(p.claudeDir, name)
@@ -487,8 +478,8 @@ func withinDir(root, target string) bool {
 	return true
 }
 
-// pruneSkills removes project skill directories that the manifest does not list.
-func pruneSkills(dir string, skills map[string]*manifest.Skill, out io.Writer) error {
+// pruneSkills removes project skill directories that are not managed.
+func pruneSkills(dir string, managed []string, out io.Writer) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -502,7 +493,7 @@ func pruneSkills(dir string, skills map[string]*manifest.Skill, out io.Writer) e
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		if _, ok := skills[name]; ok || strings.HasPrefix(name, tempPrefix) {
+		if slices.Contains(managed, name) || strings.HasPrefix(name, tempPrefix) {
 			continue
 		}
 		if err := os.RemoveAll(filepath.Join(dir, name)); err != nil {
@@ -513,13 +504,13 @@ func pruneSkills(dir string, skills map[string]*manifest.Skill, out io.Writer) e
 	return nil
 }
 
-func writeGitignore(root string, names []string) error {
+func writeGitignore(root string, names []string, claudeManaged bool) error {
 	path := filepath.Join(root, ".gitignore")
 	data, err := os.ReadFile(path)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("read .gitignore: %w", err)
 	}
-	updated, changed := mergeGitignore(string(data), names)
+	updated, changed := mergeGitignore(string(data), names, claudeManaged)
 	if !changed {
 		return nil
 	}
@@ -529,8 +520,8 @@ func writeGitignore(root string, names []string) error {
 	return nil
 }
 
-func mergeGitignore(existing string, names []string) (string, bool) {
-	block := renderGitignore(names)
+func mergeGitignore(existing string, names []string, claudeManaged bool) (string, bool) {
+	block := renderGitignore(names, claudeManaged)
 	if start, end, ok := findManagedBlock(existing); ok {
 		updated := existing[:start] + block + existing[end:]
 		return updated, updated != existing
@@ -546,7 +537,7 @@ func mergeGitignore(existing string, names []string) (string, bool) {
 	return updated, updated != existing
 }
 
-func renderGitignore(names []string) string {
+func renderGitignore(names []string, claudeManaged bool) string {
 	sorted := make([]string, len(names))
 	copy(sorted, names)
 	sort.Strings(sorted)
@@ -559,6 +550,9 @@ func renderGitignore(names []string) string {
 		b.WriteString("/.claude/skills/")
 		b.WriteString(name)
 		b.WriteByte('\n')
+	}
+	if claudeManaged {
+		b.WriteString("/CLAUDE.md\n")
 	}
 	b.WriteString(gitignoreEnd)
 	b.WriteByte('\n')
