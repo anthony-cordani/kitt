@@ -17,6 +17,8 @@ import (
 	"strings"
 
 	"golang.org/x/mod/semver"
+
+	kskill "github.com/anthony-cordani/kitt/internal/skill"
 )
 
 // Source is a git repository of skills, cached locally as a bare clone.
@@ -45,7 +47,7 @@ func Open(alias, url string) (*Source, error) {
 		if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
 			return nil, fmt.Errorf("create source cache: %w", err)
 		}
-		if _, err := runGit("clone", "--bare", "--quiet", url, dir); err != nil {
+		if _, err := runGit("clone", "--bare", "--quiet", "--", url, dir); err != nil {
 			os.RemoveAll(dir)
 			return nil, err
 		}
@@ -61,12 +63,18 @@ func (s *Source) Fetch() error {
 
 // HasCommit reports whether commit is present in the cache.
 func (s *Source) HasCommit(commit string) bool {
+	if !isCommit(commit) {
+		return false
+	}
 	_, err := runGit("-C", s.dir, "cat-file", "-e", commit+"^{commit}")
 	return err == nil
 }
 
 // Versions returns the released versions of a skill, ascending, without the "v" prefix.
 func (s *Source) Versions(skill string) ([]string, error) {
+	if err := kskill.ValidName(skill); err != nil {
+		return nil, err
+	}
 	out, err := runGit("-C", s.dir, "tag", "--list", skill+"/v*")
 	if err != nil {
 		return nil, err
@@ -122,6 +130,12 @@ func (s *Source) Resolve(skill, constraint string) (Resolved, error) {
 
 // Extract writes the skill directory found at commit into dest, which must not exist.
 func (s *Source) Extract(skill, commit, dest string) error {
+	if err := kskill.ValidName(skill); err != nil {
+		return err
+	}
+	if !isCommit(commit) {
+		return fmt.Errorf("invalid commit %q", commit)
+	}
 	if _, err := os.Lstat(dest); err == nil {
 		return fmt.Errorf("destination %s already exists", dest)
 	} else if !errors.Is(err, fs.ErrNotExist) {
@@ -408,15 +422,32 @@ func writeFile(target string, r io.Reader, mode os.FileMode) error {
 	return nil
 }
 
+// isCommit reports whether s is a full lowercase hexadecimal object name (SHA-1 or SHA-256).
+func isCommit(s string) bool {
+	if len(s) != 40 && len(s) != 64 {
+		return false
+	}
+	for _, r := range s {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 // runGit runs git with autocrlf and eol pinned so object bytes match on every OS.
 func runGit(args ...string) ([]byte, error) {
 	cmdArgs := make([]string, 0, len(args)+4)
-	cmdArgs = append(cmdArgs, "-c", "core.autocrlf=false", "-c", "core.eol=lf")
+	cmdArgs = append(cmdArgs, "-c", "core.autocrlf=false", "-c", "core.eol=lf", "-c", "protocol.ext.allow=never")
 	cmdArgs = append(cmdArgs, args...)
 	cmd := exec.Command("git", cmdArgs...)
 	env := make([]string, 0, len(os.Environ())+1)
 	for _, e := range os.Environ() {
-		if strings.HasPrefix(e, "GIT_TERMINAL_PROMPT=") {
+		// A git hook exports GIT_DIR and friends; they would redirect every command to the project repository.
+		if strings.HasPrefix(e, "GIT_TERMINAL_PROMPT=") || strings.HasPrefix(e, "GIT_DIR=") ||
+			strings.HasPrefix(e, "GIT_WORK_TREE=") || strings.HasPrefix(e, "GIT_INDEX_FILE=") ||
+			strings.HasPrefix(e, "GIT_OBJECT_DIRECTORY=") || strings.HasPrefix(e, "GIT_ALTERNATE_OBJECT_DIRECTORIES=") ||
+			strings.HasPrefix(e, "GIT_COMMON_DIR=") {
 			continue
 		}
 		env = append(env, e)
