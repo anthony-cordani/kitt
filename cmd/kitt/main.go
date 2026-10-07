@@ -31,6 +31,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	for _, c := range commands {
+		if c.name == "install" && args[0] == "install" {
+			return installCmd(args[1:], stdout, stderr)
+		}
 		if c.name == args[0] {
 			fmt.Fprintf(stderr, "kitt %s: not implemented yet\n", c.name)
 			return 1
