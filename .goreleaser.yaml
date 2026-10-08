@@ -1,0 +1,53 @@
+version: 2
+
+project_name: kitt
+
+builds:
+  - main: ./cmd/kitt
+    binary: kitt
+    env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux, windows]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w
+
+archives:
+  - formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files: [LICENSE, README.md]
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: github
+  sort: asc
+
+homebrew_casks:
+  - name: kitt
+    repository:
+      owner: anthony-cordani
+      name: homebrew-tap
+      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
+    homepage: https://github.com/anthony-cordani/kitt
+    description: Install, pin and publish AI agent skills per project, straight from git.
+    license: MIT
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/kitt"]
+          end
+
+scoops:
+  - name: kitt
+    repository:
+      owner: anthony-cordani
+      name: scoop-bucket
+      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
+    homepage: https://github.com/anthony-cordani/kitt
+    description: Install, pin and publish AI agent skills per project, straight from git.
+    license: MIT
