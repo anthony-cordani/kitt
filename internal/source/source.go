@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"golang.org/x/mod/semver"
@@ -168,6 +169,69 @@ func (s *Source) Extract(skill, commit, dest string) error {
 		return err
 	}
 	return nil
+}
+
+// Skills returns the names of the skills on the default branch, sorted.
+func (s *Source) Skills() ([]string, error) {
+	out, err := runGit("-C", s.dir, "ls-tree", "--name-only", "HEAD", "skills/")
+	if err != nil {
+		return nil, err
+	}
+	text := strings.TrimSpace(string(out))
+	if text == "" {
+		return []string{}, nil
+	}
+	var names []string
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		name, ok := skillEntry(line)
+		if !ok {
+			continue
+		}
+		if err := kskill.ValidName(name); err != nil {
+			continue
+		}
+		if _, err := runGit("-C", s.dir, "cat-file", "-e", "HEAD:skills/"+name+"/SKILL.md"); err != nil {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	if names == nil {
+		names = []string{}
+	}
+	return names, nil
+}
+
+// Diff returns the git diff of a skill directory between two commits.
+func (s *Source) Diff(skill, from, to string) (string, error) {
+	if err := kskill.ValidName(skill); err != nil {
+		return "", err
+	}
+	if !isCommit(from) {
+		return "", fmt.Errorf("invalid commit %q", from)
+	}
+	if !isCommit(to) {
+		return "", fmt.Errorf("invalid commit %q", to)
+	}
+	out, err := runGit("-C", s.dir, "diff", "--no-color", from, to, "--", "skills/"+skill)
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
+// skillEntry reports the skill name of a "skills/<name>" tree line.
+func skillEntry(line string) (string, bool) {
+	const prefix = "skills/"
+	if !strings.HasPrefix(line, prefix) {
+		return "", false
+	}
+	name := strings.TrimPrefix(line, prefix)
+	if name == "" || strings.Contains(name, "/") {
+		return "", false
+	}
+	return name, true
 }
 
 // cacheDir is UserCacheDir/kitt/sources/<first 16 hex chars of sha256(url)>.

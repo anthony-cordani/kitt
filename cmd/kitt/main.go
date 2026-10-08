@@ -37,6 +37,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		if c.name == "install" && args[0] == "install" {
 			return installCmd(args[1:], stdout, stderr)
 		}
+		if c.name == "upgrade" && args[0] == "upgrade" {
+			return upgradeCmd(args[1:], stdout, stderr)
+		}
+		if c.name == "list" && args[0] == "list" {
+			return listCmd(args[1:], stdout, stderr)
+		}
 		if c.name == args[0] {
 			fmt.Fprintf(stderr, "kitt %s: not implemented yet\n", c.name)
 			return 1
