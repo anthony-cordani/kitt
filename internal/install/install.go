@@ -379,9 +379,7 @@ func ensureLink(p paths, name string, out io.Writer) error {
 		}
 		return createLink(p, link, dest, name)
 	}
-	linked, errLink := filepath.EvalSymlinks(link)
-	wanted, errDest := filepath.EvalSymlinks(dest)
-	if errLink == nil && errDest == nil && linked == wanted {
+	if sameDir(link, dest) {
 		return nil
 	}
 	fmt.Fprintf(out, "warning: %s is not managed by kitt, left untouched\n", link)
@@ -608,4 +606,19 @@ func skipLine(s string, i int) int {
 		return i + 1
 	}
 	return i
+}
+
+// sameDir reports whether two paths reach the same directory once links are followed.
+// It compares file identities, not resolved paths: on Windows filepath.EvalSymlinks
+// does not follow the junctions kitt creates.
+func sameDir(a, b string) bool {
+	ia, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	ib, err := os.Stat(b)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(ia, ib)
 }

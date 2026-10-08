@@ -175,16 +175,16 @@ func assertMissing(t *testing.T, path string) {
 
 func assertLinkResolves(t *testing.T, link, dest string) {
 	t.Helper()
-	got, err := filepath.EvalSymlinks(link)
+	got, err := os.Stat(link)
 	if err != nil {
-		t.Fatalf("EvalSymlinks %s: %v", link, err)
+		t.Fatalf("stat %s: %v", link, err)
 	}
-	want, err := filepath.EvalSymlinks(dest)
+	want, err := os.Stat(dest)
 	if err != nil {
-		t.Fatalf("EvalSymlinks %s: %v", dest, err)
+		t.Fatalf("stat %s: %v", dest, err)
 	}
-	if got != want {
-		t.Fatalf("EvalSymlinks(%s) = %s, want %s", link, got, want)
+	if !os.SameFile(got, want) {
+		t.Fatalf("%s does not lead to %s", link, dest)
 	}
 }
 
@@ -258,10 +258,11 @@ func snapshot(t *testing.T, root string) map[string]string {
 		if rel == ".git" || strings.HasPrefix(rel, ".git"+string(filepath.Separator)) {
 			return filepath.SkipDir
 		}
-		if d.Type()&os.ModeSymlink != 0 {
+		if !d.IsDir() && !d.Type().IsRegular() {
+			// Symlinks, and on Windows the junctions kitt creates (reported as irregular files).
 			target, err := os.Readlink(path)
 			if err != nil {
-				return err
+				target = "?"
 			}
 			got[rel] = "link:" + target
 			return nil

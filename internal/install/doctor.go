@@ -121,9 +121,7 @@ func (d *doctor) links(names []string) error {
 			return fmt.Errorf("stat %s: %w", link, err)
 		}
 		dest := filepath.Join(d.p.skillsDir, name)
-		linked, errLink := filepath.EvalSymlinks(link)
-		wanted, errDest := filepath.EvalSymlinks(dest)
-		if errLink != nil || errDest != nil || linked != wanted {
+		if !sameDir(link, dest) {
 			d.line(fmt.Sprintf("foreign entry: %s is not a kitt link", shown))
 		}
 	}
