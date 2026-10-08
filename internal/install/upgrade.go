@@ -20,25 +20,28 @@ func Upgrade(opts Options, name string, major bool) error {
 	if err != nil {
 		return err
 	}
+	if err := validateManifestNames(m); err != nil {
+		return err
+	}
+	p.installed, err = readInstalled(p, m)
+	if err != nil {
+		return err
+	}
 	targets, err := upgradeTargets(m, p.manifest, name)
 	if err != nil {
 		return err
 	}
 	out := outputOf(opts.Out)
 	opened := map[string]*source.Source{}
-	dirty := false
 	for _, skillName := range targets {
 		changed, err := upgradeOne(p, m, opened, out, skillName, major)
 		if err != nil {
 			return err
 		}
 		if changed {
-			dirty = true
-		}
-	}
-	if dirty {
-		if err := m.Save(p.manifest); err != nil {
-			return err
+			if err := m.Save(p.manifest); err != nil {
+				return err
+			}
 		}
 	}
 	return finish(p, sortedNames(m.Skills), false, out)
@@ -87,7 +90,7 @@ func upgradeOne(p paths, m *manifest.Manifest, opened map[string]*source.Source,
 		}
 		fmt.Fprint(out, diff)
 	}
-	sum, err := installAt(p.skillsDir, name, next.Commit, "", src)
+	sum, err := installAt(p, name, next.Commit, "", src)
 	if err != nil {
 		return false, err
 	}
@@ -142,6 +145,8 @@ func selectUpgrade(src *source.Source, sk *manifest.Skill, name string, major bo
 	current := latest
 	if sk.Resolved != nil && sk.Resolved.Version != "" {
 		current = sk.Resolved.Version
+	} else if sk.Version != "" {
+		current = sk.Version
 	}
 	currentMajor, err := versionMajor(current)
 	if err != nil {
@@ -162,6 +167,9 @@ func selectUpgrade(src *source.Source, sk *manifest.Skill, name string, major bo
 	}
 	if chosen == "" {
 		return source.Resolved{}, "", fmt.Errorf("skill %s: no version with major %d", name, currentMajor)
+	}
+	if !major && (sk.Resolved == nil || sk.Resolved.Version == "") && sk.Version != "" {
+		chosen = sk.Version
 	}
 	resolved, err := src.Resolve(name, chosen)
 	if err != nil {

@@ -42,11 +42,18 @@ func Restore(opts Options) error {
 	if err != nil {
 		return err
 	}
+	if err := validateManifestNames(m); err != nil {
+		return err
+	}
+	p.installed, err = readInstalled(p, m)
+	if err != nil {
+		return err
+	}
 	out := outputOf(opts.Out)
 	dirty := false
 	for _, name := range sortedNames(m.Skills) {
-		if !p.global && strings.HasPrefix(name, "kitt-") {
-			return fmt.Errorf("skill names starting with kitt- are reserved")
+		if err := p.installed.check(name); err != nil {
+			return err
 		}
 		sk := m.Skills[name]
 		if sk == nil {
@@ -65,9 +72,12 @@ func Restore(opts Options) error {
 			if err != nil {
 				return fmt.Errorf("resolve skill %s: %w", name, err)
 			}
-			sum, err := installAt(p.skillsDir, name, resolved.Commit, "", src)
+			sum, err := installAt(p, name, resolved.Commit, "", src)
 			if err != nil {
 				return err
+			}
+			if sk.Version == "" && resolved.Version != "" {
+				sk.Version = "^" + resolved.Version
 			}
 			sk.Resolved = &manifest.Resolved{
 				Version: resolved.Version,
@@ -99,7 +109,7 @@ func Restore(opts Options) error {
 				return fmt.Errorf("skill %s: commit %s not found in %s", name, shortCommit(sk.Resolved.Commit), sk.Source)
 			}
 		}
-		if _, err := installAt(p.skillsDir, name, sk.Resolved.Commit, sk.Resolved.Hash, src); err != nil {
+		if _, err := installAt(p, name, sk.Resolved.Commit, sk.Resolved.Hash, src); err != nil {
 			return err
 		}
 		fmt.Fprintf(out, "installed %s %s\n", name, versionLabel(sk.Resolved.Version, sk.Resolved.Commit))
@@ -125,6 +135,13 @@ func Add(opts Options, ref string) error {
 	if err != nil {
 		return err
 	}
+	if err := validateManifestNames(m); err != nil {
+		return err
+	}
+	p.installed, err = readInstalled(p, m)
+	if err != nil {
+		return err
+	}
 	alias, name, constraint := parseRef(ref)
 	if alias == "" {
 		switch len(m.Sources) {
@@ -145,8 +162,11 @@ func Add(opts Options, ref string) error {
 	if err := skill.ValidName(name); err != nil {
 		return err
 	}
-	if !p.global && strings.HasPrefix(name, "kitt-") {
+	if strings.HasPrefix(name, "kitt-") {
 		return fmt.Errorf("skill names starting with kitt- are reserved")
+	}
+	if err := p.installed.check(name); err != nil {
+		return err
 	}
 	src, err := openFetch(alias, url)
 	if err != nil {
@@ -156,7 +176,7 @@ func Add(opts Options, ref string) error {
 	if err != nil {
 		return fmt.Errorf("resolve skill %s: %w", name, err)
 	}
-	sum, err := installAt(p.skillsDir, name, resolved.Commit, "", src)
+	sum, err := installAt(p, name, resolved.Commit, "", src)
 	if err != nil {
 		return err
 	}
@@ -191,6 +211,7 @@ type paths struct {
 	manifest  string
 	skillsDir string
 	claudeDir string
+	installed *installedState
 }
 
 func locate(opts Options) (paths, error) {
@@ -246,11 +267,15 @@ func openFetch(alias, url string) (*source.Source, error) {
 
 // installAt extracts commit into the skills directory.
 // expected is checked when non-empty. The returned hash is the installed tree.
-func installAt(skillsDir, name, commit, expected string, src *source.Source) (string, error) {
+func installAt(p paths, name, commit, expected string, src *source.Source) (string, error) {
 	// ValidName before the name is joined onto a path.
 	if err := skill.ValidName(name); err != nil {
 		return "", err
 	}
+	if err := p.installed.check(name); err != nil {
+		return "", err
+	}
+	skillsDir := p.skillsDir
 	if err := os.MkdirAll(skillsDir, 0o755); err != nil {
 		return "", fmt.Errorf("create skills dir: %w", err)
 	}
@@ -289,15 +314,22 @@ func installAt(skillsDir, name, commit, expected string, src *source.Source) (st
 		os.RemoveAll(tmp)
 		return "", fmt.Errorf("install skill %s: %w", name, err)
 	}
+	if err := p.installed.add(name); err != nil {
+		return "", err
+	}
 	return sum, nil
 }
 
 func hashMatches(dest, want string) (bool, error) {
-	if _, err := os.Lstat(dest); err != nil {
+	info, err := os.Lstat(dest)
+	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return false, nil
 		}
 		return false, fmt.Errorf("stat skill: %w", err)
+	}
+	if !info.IsDir() {
+		return false, nil
 	}
 	got, err := skill.Hash(dest)
 	if err != nil {
@@ -353,7 +385,7 @@ func outputOf(w io.Writer) io.Writer {
 
 // syncLinks makes .claude/skills point at each managed skill.
 // Project installs also drop links kitt previously created for skills that are gone.
-func syncLinks(p paths, names []string, out io.Writer) error {
+func syncLinks(p paths, names []string, previouslyInstalled map[string]bool, out io.Writer) error {
 	if len(names) > 0 {
 		if err := os.MkdirAll(p.claudeDir, 0o755); err != nil {
 			return fmt.Errorf("create claude skills dir: %w", err)
@@ -367,7 +399,7 @@ func syncLinks(p paths, names []string, out io.Writer) error {
 	if p.global {
 		return nil
 	}
-	return pruneLinks(p, names)
+	return pruneLinks(p, names, previouslyInstalled)
 }
 
 func ensureLink(p paths, name string, out io.Writer) error {
@@ -391,6 +423,9 @@ func createLink(p paths, link, dest, name string) error {
 		abs, err := filepath.Abs(dest)
 		if err != nil {
 			return fmt.Errorf("resolve skill %s: %w", name, err)
+		}
+		if err := validateJunctionPaths(link, abs); err != nil {
+			return err
 		}
 		cmd := exec.Command("cmd", "/c", "mklink", "/J", link, abs)
 		msg, err := cmd.CombinedOutput()
@@ -421,7 +456,7 @@ func symlinkTarget(p paths, name string) (string, error) {
 	return "../../.agents/skills/" + name, nil
 }
 
-func pruneLinks(p paths, names []string) error {
+func pruneLinks(p paths, names []string, previouslyInstalled map[string]bool) error {
 	entries, err := os.ReadDir(p.claudeDir)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -435,7 +470,7 @@ func pruneLinks(p paths, names []string) error {
 	}
 	for _, ent := range entries {
 		name := ent.Name()
-		if slices.Contains(names, name) {
+		if slices.Contains(names, name) || !previouslyInstalled[name] {
 			continue
 		}
 		link := filepath.Join(p.claudeDir, name)
@@ -477,7 +512,8 @@ func withinDir(root, target string) bool {
 }
 
 // pruneSkills removes project skill directories that are not managed.
-func pruneSkills(dir string, managed []string, out io.Writer) error {
+func pruneSkills(state *installedState, managed []string, out io.Writer) error {
+	dir := state.dir
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -491,13 +527,27 @@ func pruneSkills(dir string, managed []string, out io.Writer) error {
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		if slices.Contains(managed, name) || strings.HasPrefix(name, tempPrefix) {
+		if slices.Contains(managed, name) || name == installedFile || strings.HasPrefix(name, tempPrefix) {
+			continue
+		}
+		if !state.names[name] {
+			fmt.Fprintf(out, "warning: .agents/skills/%s is not managed by kitt, left untouched\n", name)
 			continue
 		}
 		if err := os.RemoveAll(filepath.Join(dir, name)); err != nil {
 			return fmt.Errorf("remove %s: %w", name, err)
 		}
+		if err := state.remove(name); err != nil {
+			return err
+		}
 		fmt.Fprintf(out, "removed %s\n", name)
+	}
+	for name := range state.names {
+		if !slices.Contains(managed, name) {
+			if err := state.remove(name); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
@@ -621,4 +671,25 @@ func sameDir(a, b string) bool {
 		return false
 	}
 	return os.SameFile(ia, ib)
+}
+
+// validateManifestNames runs before any manifest key can reach a filesystem path.
+func validateManifestNames(m *manifest.Manifest) error {
+	for _, name := range sortedNames(m.Skills) {
+		if err := skill.ValidName(name); err != nil {
+			reason := strings.TrimPrefix(err.Error(), fmt.Sprintf("invalid skill name %q: ", name))
+			return fmt.Errorf("invalid skill name in kitt.toml: %q: %s", name, reason)
+		}
+		if strings.HasPrefix(name, "kitt-") {
+			return fmt.Errorf("invalid skill name in kitt.toml: %q: skill names starting with kitt- are reserved", name)
+		}
+	}
+	return nil
+}
+
+func validateJunctionPaths(link, target string) error {
+	if strings.ContainsAny(link, "&|<>^%!\"") || strings.ContainsAny(target, "&|<>^%!\"") {
+		return fmt.Errorf("cannot create a junction for a path containing one of & | < > ^ %% ! \"")
+	}
+	return nil
 }

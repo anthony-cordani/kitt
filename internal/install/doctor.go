@@ -29,6 +29,9 @@ func Doctor(opts Options) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	if err := validateManifestNames(m); err != nil {
+		return 0, err
+	}
 	agents := ""
 	agentsExists := false
 	if !p.global {
@@ -338,7 +341,7 @@ func stripGitEnv(env []string) []string {
 	for _, kv := range env {
 		key, _, _ := strings.Cut(kv, "=")
 		switch key {
-		case "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE":
+		case "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES":
 			continue
 		}
 		kept = append(kept, kv)

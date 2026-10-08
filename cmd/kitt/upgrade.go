@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/anthony-cordani/kitt/internal/install"
 )
@@ -19,7 +20,22 @@ func upgradeCmd(args []string, stdout, stderr io.Writer) int {
 	}
 	global := fs.Bool("g", false, "upgrade user-level skills instead of the current project")
 	major := fs.Bool("major", false, "allow a new major version")
-	if err := fs.Parse(args); err != nil {
+	// These commands have only boolean flags; move them ahead of positional arguments.
+	var flags, positional []string
+	for i, arg := range args {
+		if arg == "--" {
+			positional = append(positional, args[i+1:]...)
+			break
+		}
+		if strings.HasPrefix(arg, "-") && arg != "-" {
+			flags = append(flags, arg)
+		} else {
+			positional = append(positional, arg)
+		}
+	}
+	ordered := append(flags, "--")
+	ordered = append(ordered, positional...)
+	if err := fs.Parse(ordered); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}

@@ -193,7 +193,8 @@ func initHooks(root string, out io.Writer) error {
 	cmd := exec.Command("git", "-C", root, "rev-parse", "--git-path", "hooks")
 	for _, entry := range os.Environ() {
 		key, _, _ := strings.Cut(entry, "=")
-		if key == "GIT_DIR" || key == "GIT_WORK_TREE" || key == "GIT_INDEX_FILE" {
+		if key == "GIT_DIR" || key == "GIT_WORK_TREE" || key == "GIT_INDEX_FILE" ||
+			key == "GIT_COMMON_DIR" || key == "GIT_OBJECT_DIRECTORY" || key == "GIT_ALTERNATE_OBJECT_DIRECTORIES" {
 			continue
 		}
 		cmd.Env = append(cmd.Env, entry)
@@ -225,6 +226,25 @@ func initHook(path, name string, out io.Writer) error {
 		return fmt.Errorf("read hook %s: %w", name, err)
 	}
 	existing := string(data)
+	if !missing && strings.HasPrefix(existing, "#!") {
+		line, _, _ := strings.Cut(existing, "\n")
+		words := strings.Fields(strings.TrimPrefix(line, "#!"))
+		interpreter := ""
+		if len(words) > 0 {
+			interpreter = filepath.Base(words[0])
+			if interpreter == "env" && len(words) > 1 {
+				words = words[1:]
+				if words[0] == "-S" && len(words) > 1 {
+					words = words[1:]
+				}
+				interpreter = words[0]
+			}
+		}
+		if interpreter != "sh" && interpreter != "bash" && interpreter != "zsh" {
+			fmt.Fprintf(out, "warning: hook %s has a non-shell interpreter, left untouched\n", name)
+			return nil
+		}
+	}
 	updated := existing
 	if missing {
 		updated = "#!/bin/sh\n" + hookBlock

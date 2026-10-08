@@ -23,6 +23,9 @@ func List(opts Options) error {
 	if err != nil {
 		return err
 	}
+	if err := validateManifestNames(m); err != nil {
+		return err
+	}
 	out := outputOf(opts.Out)
 	fmt.Fprintln(out, "Installed:")
 	names := sortedNames(m.Skills)

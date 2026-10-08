@@ -64,8 +64,24 @@ func Check(url string) error {
 
 // Fetch updates the cached clone from the remote.
 func (s *Source) Fetch() error {
-	_, err := runGit("-C", s.dir, "fetch", "--quiet", "--prune", "--tags", "origin", "+refs/heads/*:refs/heads/*")
-	return err
+	if _, err := runGit("-C", s.dir, "fetch", "--quiet", "--prune", "--tags", "origin", "+refs/heads/*:refs/heads/*"); err != nil {
+		return err
+	}
+	out, err := runGit("-C", s.dir, "ls-remote", "--symref", "--", "origin", "HEAD")
+	if err != nil {
+		return err
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if !strings.HasPrefix(line, "ref: refs/heads/") {
+			continue
+		}
+		ref, _, ok := strings.Cut(strings.TrimPrefix(line, "ref: "), "\t")
+		if ok {
+			_, err := runGit("-C", s.dir, "symbolic-ref", "HEAD", ref)
+			return err
+		}
+	}
+	return nil
 }
 
 // HasCommit reports whether commit is present in the cache.
@@ -98,7 +114,7 @@ func (s *Source) Versions(skill string) ([]string, error) {
 			continue
 		}
 		suffix := strings.TrimPrefix(tag, prefix)
-		if semver.IsValid(suffix) && semver.Prerelease(suffix) == "" {
+		if semver.IsValid(suffix) && semver.Prerelease(suffix) == "" && semver.Build(suffix) == "" && semver.Canonical(suffix) == suffix {
 			matched = append(matched, suffix)
 		}
 	}
@@ -507,8 +523,12 @@ func isCommit(s string) bool {
 
 // runGit runs git with autocrlf and eol pinned so object bytes match on every OS.
 func runGit(args ...string) ([]byte, error) {
+	// All -C calls in this package address a bare cache, which must be explicit.
+	if len(args) >= 2 && args[0] == "-C" {
+		args = append([]string{"--git-dir=" + args[1]}, args[2:]...)
+	}
 	cmdArgs := make([]string, 0, len(args)+4)
-	cmdArgs = append(cmdArgs, "-c", "core.autocrlf=false", "-c", "core.eol=lf", "-c", "protocol.ext.allow=never")
+	cmdArgs = append(cmdArgs, "-c", "core.autocrlf=false", "-c", "core.eol=lf", "-c", "protocol.ext.allow=never", "-c", "core.attributesFile="+os.DevNull)
 	cmdArgs = append(cmdArgs, args...)
 	cmd := exec.Command("git", cmdArgs...)
 	env := make([]string, 0, len(os.Environ())+1)

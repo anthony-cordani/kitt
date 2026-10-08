@@ -26,6 +26,9 @@ func Release(opts Options, name string) error {
 	if err := skill.ValidName(name); err != nil {
 		return err
 	}
+	if strings.HasPrefix(name, "kitt-") {
+		return fmt.Errorf("skill names starting with kitt- are reserved")
+	}
 	root, err := repoRoot(opts.Dir)
 	if err != nil {
 		return err

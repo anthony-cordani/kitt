@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -15,8 +16,12 @@ import (
 )
 
 func finish(p paths, names []string, prune bool, out io.Writer) error {
+	previouslyInstalled := make(map[string]bool, len(p.installed.names))
+	for name := range p.installed.names {
+		previouslyInstalled[name] = true
+	}
 	if p.global {
-		return syncLinks(p, names, out)
+		return syncLinks(p, names, previouslyInstalled, out)
 	}
 	agentsPath := filepath.Join(p.root, "AGENTS.md")
 	agents, err := os.ReadFile(agentsPath)
@@ -31,7 +36,7 @@ func finish(p paths, names []string, prune bool, out io.Writer) error {
 			break
 		}
 	}
-	if err := syncBootstrap(p.skillsDir, active); err != nil {
+	if err := syncBootstrap(p, active); err != nil {
 		return err
 	}
 	if active {
@@ -49,23 +54,29 @@ func finish(p paths, names []string, prune bool, out io.Writer) error {
 		}
 	}
 	if prune {
-		if err := pruneSkills(p.skillsDir, names, out); err != nil {
+		if err := pruneSkills(p.installed, names, out); err != nil {
 			return err
 		}
 	}
-	if err := syncLinks(p, names, out); err != nil {
+	if err := syncLinks(p, names, previouslyInstalled, out); err != nil {
 		return err
 	}
 	return writeGitignore(p.root, names, claudeManaged)
 }
 
-func syncBootstrap(skillsDir string, active bool) error {
-	dest := filepath.Join(skillsDir, templates.BootstrapSkill)
+func syncBootstrap(p paths, active bool) error {
+	dest := filepath.Join(p.skillsDir, templates.BootstrapSkill)
 	if !active {
+		if !p.installed.names[templates.BootstrapSkill] {
+			return nil
+		}
 		if err := os.RemoveAll(dest); err != nil {
 			return fmt.Errorf("remove bootstrap skill: %w", err)
 		}
-		return nil
+		return p.installed.remove(templates.BootstrapSkill)
+	}
+	if err := p.installed.check(templates.BootstrapSkill); err != nil {
+		return err
 	}
 	const root = "files/kitt-bootstrap"
 	err := fs.WalkDir(templates.FS, root, func(path string, entry fs.DirEntry, err error) error {
@@ -95,7 +106,7 @@ func syncBootstrap(skillsDir string, active bool) error {
 	if err != nil {
 		return fmt.Errorf("install bootstrap skill: %w", err)
 	}
-	return nil
+	return p.installed.add(templates.BootstrapSkill)
 }
 
 func syncClaudeMD(root string, out io.Writer) (bool, error) {
@@ -171,7 +182,8 @@ func docsIndex(dir string) (string, error) {
 		if title == "" {
 			title = strings.TrimSuffix(name, ".md")
 		}
-		fmt.Fprintf(&index, "- [%s](.agents/docs/%s)", title, name)
+		title = strings.NewReplacer(`\`, `\\`, `[`, `\[`, `]`, `\]`).Replace(title)
+		fmt.Fprintf(&index, "- [%s](.agents/docs/%s)", title, url.PathEscape(name))
 		if description != "" {
 			fmt.Fprintf(&index, " — %s", description)
 		}

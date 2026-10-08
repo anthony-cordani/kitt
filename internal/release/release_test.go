@@ -200,3 +200,17 @@ func requireErrPrefix(t *testing.T, err error, prefix string) {
 		t.Fatalf("error %q\nwant prefix %q", err.Error(), prefix)
 	}
 }
+
+func TestReleaseRejectsReservedName(t *testing.T) {
+	testutil.IsolateHome(t)
+	repo, _ := newPushedSkillRepo(t, "origin", "1.0.0")
+	testutil.WriteSkill(t, repo, "kitt-custom", "1.0.0", "reserved")
+	testutil.Commit(t, repo, "reserved")
+	testutil.Git(t, repo, "push", "origin", "main")
+	before := remoteTags(t, repo, "origin")
+	err := Release(originOpts(repo, io.Discard), "kitt-custom")
+	if err == nil || !strings.Contains(err.Error(), "reserved") {
+		t.Fatalf("error = %v", err)
+	}
+	requireRemoteTags(t, repo, "origin", before)
+}
