@@ -46,6 +46,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 		if c.name == "doctor" && args[0] == "doctor" {
 			return doctorCmd(args[1:], stdout, stderr)
 		}
+		if c.name == "release" && args[0] == "release" {
+			return releaseCmd(args[1:], stdout, stderr)
+		}
 		if c.name == args[0] {
 			fmt.Fprintf(stderr, "kitt %s: not implemented yet\n", c.name)
 			return 1
