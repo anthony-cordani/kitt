@@ -457,10 +457,11 @@ func snapshotTree(t *testing.T, root string) map[string]string {
 		if err != nil {
 			return err
 		}
-		if info.Mode()&os.ModeSymlink != 0 {
+		if !d.IsDir() && !info.Mode().IsRegular() {
+			// Symlinks, and on Windows the junctions kitt creates (reported as irregular files).
 			target, err := os.Readlink(path)
 			if err != nil {
-				return err
+				target = "?"
 			}
 			out[rel] = "symlink:" + target
 			return nil
