@@ -51,3 +51,28 @@ scoops:
     homepage: https://github.com/anthony-cordani/kitt
     description: Install, pin and publish AI agent skills per project, straight from git.
     license: MIT
+
+winget:
+  - name: kitt
+    publisher: Anthony Cordani
+    package_identifier: AnthonyCordani.kitt
+    short_description: Install, pin and publish AI agent skills per project, straight from git.
+    license: MIT
+    license_url: https://github.com/anthony-cordani/kitt/blob/main/LICENSE
+    homepage: https://github.com/anthony-cordani/kitt
+    publisher_url: https://github.com/anthony-cordani
+    publisher_support_url: https://github.com/anthony-cordani/kitt/issues
+    release_notes_url: https://github.com/anthony-cordani/kitt/releases/tag/{{ .Tag }}
+    tags: [cli, ai, agents, skills]
+    skip_upload: auto
+    repository:
+      owner: anthony-cordani
+      name: winget-pkgs
+      branch: "kitt-{{ .Version }}"
+      token: "{{ .Env.WINGET_GITHUB_TOKEN }}"
+      pull_request:
+        enabled: true
+        base:
+          owner: microsoft
+          name: winget-pkgs
+          branch: master
