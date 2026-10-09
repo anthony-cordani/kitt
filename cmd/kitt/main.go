@@ -5,7 +5,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime/debug"
 )
+
+// version is set at release time by goreleaser (-X main.version=...).
+var version = "dev"
 
 type command struct {
 	name    string
@@ -28,6 +32,10 @@ func main() {
 func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" || args[0] == "help" {
 		usage(stdout)
+		return 0
+	}
+	if args[0] == "--version" || args[0] == "version" {
+		fmt.Fprintf(stdout, "kitt %s\n", currentVersion())
 		return 0
 	}
 	for _, c := range commands {
@@ -64,9 +72,21 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Usage:")
 	fmt.Fprintln(w, "  kitt <command> [arguments]")
+	fmt.Fprintln(w, "  kitt --version")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Commands:")
 	for _, c := range commands {
 		fmt.Fprintf(w, "  %-8s %s\n", c.name, c.summary)
 	}
+}
+
+// currentVersion returns the release version, the module version of a go install build, or "dev".
+func currentVersion() string {
+	if version != "dev" {
+		return version
+	}
+	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+		return info.Main.Version
+	}
+	return version
 }

@@ -128,3 +128,15 @@ func runDoctor() (int, string, string) {
 	code := run([]string{"doctor"}, &stdout, &stderr)
 	return code, stdout.String(), stderr.String()
 }
+
+func TestVersion(t *testing.T) {
+	for _, arg := range []string{"--version", "version"} {
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{arg}, &stdout, &stderr); code != 0 {
+			t.Fatalf("run(%s) = %d, stderr %q", arg, code, stderr.String())
+		}
+		if got := stdout.String(); !strings.HasPrefix(got, "kitt ") || strings.TrimSpace(got) == "kitt" {
+			t.Fatalf("run(%s) stdout = %q, want \"kitt <version>\"", arg, got)
+		}
+	}
+}
