@@ -64,7 +64,7 @@ kitt never overwrites a file it did not create. On a project that already has an
 | `kitt doctor` | Reports drift: skill modified locally, missing link, outdated `.gitignore` block or docs index, stale project docs. Exit code 2 when something is wrong. Changes nothing. |
 | `kitt release <skill>` | In a skills repository: tags and pushes a new version of a skill (see below). |
 
-`install`, `upgrade`, `list` and `doctor` take `-g` to work on user-level skills instead of the current project.
+`install`, `upgrade`, `list` and `doctor` take `-g` to work on user-level skills instead of the current project. The first time, give the skills repository: `kitt install -g --source alias=url <skill>` creates the user `kitt.toml` (repeatable `--source`, `-g` only).
 
 ### Version constraints
 
