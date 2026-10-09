@@ -248,11 +248,12 @@ func AddSources(opts Options, sources map[string]string) error {
 	if err := m.Save(p.manifest); err != nil {
 		return err
 	}
+	out := outputOf(opts.Out)
 	if created {
-		fmt.Fprintf(opts.Out, "created %s\n", p.manifest)
+		fmt.Fprintf(out, "created %s\n", p.manifest)
 	}
 	for _, alias := range added {
-		fmt.Fprintf(opts.Out, "added source %s\n", alias)
+		fmt.Fprintf(out, "added source %s\n", alias)
 	}
 	return nil
 }
