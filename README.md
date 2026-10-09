@@ -15,6 +15,7 @@ kitt gives every project the same AI setup on every machine: an `AGENTS.md` the 
 brew install anthony-cordani/tap/kitt          # macOS, Linux
 scoop bucket add kitt https://github.com/anthony-cordani/scoop-bucket
 scoop install kitt                              # Windows
+winget install AnthonyCordani.kitt              # Windows (winget)
 go install github.com/anthony-cordani/kitt/cmd/kitt@latest
 ```
 
