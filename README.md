@@ -1,4 +1,6 @@
-# kitt
+<p align="center">
+  <img src="assets/header.svg" alt="kitt" width="720">
+</p>
 
 Install, pin and publish AI agent skills per project, straight from git.
 

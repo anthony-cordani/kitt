@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="190" viewBox="0 0 720 190" role="img" aria-label="kitt">
+  <defs>
+    <linearGradient id="beam" x1="0" x2="1" y1="0" y2="0">
+      <stop offset="0" stop-color="#ff2200" stop-opacity="0"/>
+      <stop offset="0.35" stop-color="#ff2200" stop-opacity="0.55"/>
+      <stop offset="0.5" stop-color="#ffb199"/>
+      <stop offset="0.65" stop-color="#ff2200" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#ff2200" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="glow" x="-50%" y="-200%" width="200%" height="500%">
+      <feGaussianBlur stdDeviation="10"/>
+    </filter>
+    <clipPath id="segments">
+      <rect x="62" y="40" width="46" height="26" rx="3"/><rect x="112" y="40" width="46" height="26" rx="3"/>
+      <rect x="162" y="40" width="46" height="26" rx="3"/><rect x="212" y="40" width="46" height="26" rx="3"/>
+      <rect x="262" y="40" width="46" height="26" rx="3"/><rect x="312" y="40" width="46" height="26" rx="3"/>
+      <rect x="362" y="40" width="46" height="26" rx="3"/><rect x="412" y="40" width="46" height="26" rx="3"/>
+      <rect x="462" y="40" width="46" height="26" rx="3"/><rect x="512" y="40" width="46" height="26" rx="3"/>
+      <rect x="562" y="40" width="46" height="26" rx="3"/><rect x="612" y="40" width="46" height="26" rx="3"/>
+    </clipPath>
+  </defs>
+  <rect width="720" height="190" rx="16" fill="#08080a"/>
+  <rect x="54" y="32" width="612" height="42" rx="8" fill="#140202" stroke="#2c0505"/>
+  <g clip-path="url(#segments)">
+    <rect x="54" y="32" width="612" height="42" fill="#2a0303"/>
+    <rect y="32" width="170" height="42" fill="url(#beam)">
+      <animate attributeName="x" values="-25;575;-25" dur="1.8s" repeatCount="indefinite"
+               calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45 0 0.55 1;0.45 0 0.55 1"/>
+    </rect>
+  </g>
+  <rect y="40" width="110" height="26" rx="13" fill="#ff2200" opacity="0.35" filter="url(#glow)">
+    <animate attributeName="x" values="35;575;35" dur="1.8s" repeatCount="indefinite"
+             calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45 0 0.55 1;0.45 0 0.55 1"/>
+  </rect>
+  <text x="360" y="135" text-anchor="middle" fill="#ff3b1f" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+        font-size="44" font-weight="700" letter-spacing="18">KITT</text>
+  <text x="360" y="167" text-anchor="middle" fill="#8a8a92" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+        font-size="14" letter-spacing="1">your project's skills, one command away</text>
+</svg>
