@@ -59,6 +59,22 @@ func TestInstallGlobalFlagAfterSkill(t *testing.T) {
 	}
 }
 
+func TestInstallSourceFlagAfterSkill(t *testing.T) {
+	home := testutil.IsolateHome(t)
+	repo := testutil.NewRepo(t)
+	testutil.WriteSkill(t, repo, "review", "1.0.0", "review 1.0.0")
+	testutil.Commit(t, repo, "review 1.0.0")
+	testutil.Git(t, repo, "tag", "review/v1.0.0")
+	t.Chdir(t.TempDir())
+	var out, stderr bytes.Buffer
+	if code := run([]string{"install", "review", "-g", "--source", "s=" + testutil.URL(repo)}, &out, &stderr); code != 0 {
+		t.Fatalf("exit %d: %s", code, &stderr)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".agents", "skills", "review", "SKILL.md")); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestInstallFlagsRespectDoubleDash(t *testing.T) {
 	testutil.IsolateHome(t)
 	t.Chdir(t.TempDir())

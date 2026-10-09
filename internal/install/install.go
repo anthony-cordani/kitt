@@ -204,6 +204,60 @@ func Add(opts Options, ref string) error {
 	return nil
 }
 
+// AddSources adds sources to the user-level kitt.toml, creating the file when it is missing.
+// Every URL is checked before anything is written; an alias already set to another URL is an error.
+func AddSources(opts Options, sources map[string]string) error {
+	if !opts.Global {
+		return fmt.Errorf("--source needs -g: in a project, use kitt init --source")
+	}
+	p, err := locate(opts)
+	if err != nil {
+		return err
+	}
+	m, err := manifest.Load(p.manifest)
+	created := false
+	if errors.Is(err, fs.ErrNotExist) {
+		m = &manifest.Manifest{Sources: map[string]string{}, Skills: map[string]*manifest.Skill{}}
+		created = true
+	} else if err != nil {
+		return err
+	}
+	aliases := make([]string, 0, len(sources))
+	for alias := range sources {
+		aliases = append(aliases, alias)
+	}
+	sort.Strings(aliases)
+	var added []string
+	for _, alias := range aliases {
+		url := sources[alias]
+		if existing, ok := m.Sources[alias]; ok {
+			if existing != url {
+				return fmt.Errorf("source %s already set to %s", alias, existing)
+			}
+			continue
+		}
+		if err := source.Check(url); err != nil {
+			return fmt.Errorf("source %s: %s is not a reachable git repository", alias, url)
+		}
+		m.Sources[alias] = url
+		added = append(added, alias)
+	}
+	if len(added) == 0 {
+		return nil
+	}
+	if err := m.Save(p.manifest); err != nil {
+		return err
+	}
+	out := outputOf(opts.Out)
+	if created {
+		fmt.Fprintf(out, "created %s\n", p.manifest)
+	}
+	for _, alias := range added {
+		fmt.Fprintf(out, "added source %s\n", alias)
+	}
+	return nil
+}
+
 // paths are the directories for one install target.
 type paths struct {
 	global    bool
@@ -247,7 +301,7 @@ func load(p paths) (*manifest.Manifest, error) {
 	}
 	if errors.Is(err, fs.ErrNotExist) {
 		if p.global {
-			return nil, fmt.Errorf("%s not found: create it with a [sources] table", p.manifest)
+			return nil, fmt.Errorf("%s not found: run kitt install -g --source <alias>=<url> <skill>", p.manifest)
 		}
 		return nil, fmt.Errorf("kitt.toml not found in %s: run kitt init, or create it with a [sources] table", p.root)
 	}
