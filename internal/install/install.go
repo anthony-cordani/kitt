@@ -52,6 +52,9 @@ func Restore(opts Options) error {
 	out := outputOf(opts.Out)
 	dirty := false
 	for _, name := range sortedNames(m.Skills) {
+		if err := p.installed.adopt(name, m.Skills[name]); err != nil {
+			return err
+		}
 		if err := p.installed.check(name); err != nil {
 			return err
 		}

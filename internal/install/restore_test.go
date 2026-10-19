@@ -111,6 +111,42 @@ func TestRestoreFalsifiedHashMismatch(t *testing.T) {
 	assertNoTempDirs(t, project)
 }
 
+func TestRestoreAdoptsUnrecordedMatchingSkill(t *testing.T) {
+	project, _ := standard(t)
+	mustAdd(t, project, "demo/review@^1")
+	dir := skillPath(project, "review")
+	state := filepath.Join(project, ".agents", "skills", ".kitt-installed")
+	testutil.WriteFile(t, state, "")
+	before := snapshot(t, dir)
+
+	out := mustRestore(t, project)
+
+	if !strings.Contains(out, "ok review 1.4.0\n") {
+		t.Fatalf("output = %q", out)
+	}
+	if !strings.Contains(readText(t, state), "review\n") {
+		t.Fatalf(".kitt-installed = %q", readText(t, state))
+	}
+	assertSameTree(t, before, snapshot(t, dir))
+}
+
+func TestRestoreRejectsUnrecordedMismatchedSkill(t *testing.T) {
+	project, _ := standard(t)
+	mustAdd(t, project, "demo/review@^1")
+	dir := skillPath(project, "review")
+	testutil.WriteFile(t, filepath.Join(project, ".agents", "skills", ".kitt-installed"), "")
+	testutil.WriteFile(t, filepath.Join(dir, "SKILL.md"), "foreign\n")
+	before := snapshot(t, dir)
+	opt, _ := withOpts(project, false)
+
+	err := install.Restore(opt)
+
+	if err == nil || !strings.Contains(err.Error(), "was not installed by kitt") {
+		t.Fatalf("Restore err = %v", err)
+	}
+	assertSameTree(t, before, snapshot(t, dir))
+}
+
 func TestRestorePinsHandWrittenEntry(t *testing.T) {
 	project, skills := standard(t)
 	testutil.WriteFile(t, filepath.Join(project, manifest.FileName), fmt.Sprintf(
