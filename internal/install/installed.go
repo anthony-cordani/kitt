@@ -84,6 +84,29 @@ func (s *installedState) check(name string) error {
 	return nil
 }
 
+// adopt records an unrecorded skill directory whose content matches its pin.
+func (s *installedState) adopt(name string, sk *manifest.Skill) error {
+	if s.names[name] || sk == nil || sk.Resolved == nil {
+		return nil
+	}
+	dest := filepath.Join(s.dir, name)
+	info, err := os.Lstat(dest)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("stat skill %s: %w", name, err)
+	}
+	if !info.IsDir() {
+		return nil
+	}
+	match, err := hashMatches(dest, sk.Resolved.Hash)
+	if err != nil || !match {
+		return err
+	}
+	return s.add(name)
+}
+
 func (s *installedState) add(name string) error {
 	if s.names[name] {
 		return nil

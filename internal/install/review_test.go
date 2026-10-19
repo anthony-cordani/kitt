@@ -110,17 +110,20 @@ func TestOwnershipRefusesExistingSkill(t *testing.T) {
 	}
 }
 
-func TestOwnershipRefusesUnownedMatchingPin(t *testing.T) {
+func TestOwnershipAdoptsUnownedMatchingPin(t *testing.T) {
 	project, _ := standard(t)
 	mustAdd(t, project, "review@^1")
 	testutil.WriteFile(t, skillPath(project, ".kitt-installed"), "")
-	before := snapshot(t, project)
+	before := snapshot(t, skillPath(project, "review"))
 	opts, _ := withOpts(project, false)
 	err := install.Restore(opts)
-	if err == nil || !strings.Contains(err.Error(), "was not installed by kitt") {
+	if err != nil {
 		t.Fatalf("error = %v", err)
 	}
-	assertSameTree(t, before, snapshot(t, project))
+	if got := readText(t, skillPath(project, ".kitt-installed")); got != "review\n" {
+		t.Fatalf("state = %q", got)
+	}
+	assertSameTree(t, before, snapshot(t, skillPath(project, "review")))
 }
 
 func TestOwnershipMigratesOnlyMatchingPins(t *testing.T) {
