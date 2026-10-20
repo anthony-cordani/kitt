@@ -389,6 +389,37 @@ func TestGitignoreWithoutAgentsMDOmitsClaudeMD(t *testing.T) {
 	}
 }
 
+func TestGitignoreMigrationFromOldBlock(t *testing.T) {
+	project, skills := standard(t)
+	release(t, skills, "spec", "1.0.0")
+	testutil.WriteFile(t, filepath.Join(project, "AGENTS.md"), "# Project\n")
+	mustAdd(t, project, "demo/review@^1")
+	mustAdd(t, project, "demo/spec@^1")
+
+	const prefix = "node_modules/\n"
+	const suffix = "\n# local\n*.log\n"
+	const oldBlock = "# >>> kitt (managed by kitt, do not edit)\n" +
+		"/.agents/skills/\n" +
+		"/.claude/skills/review\n" +
+		"/.claude/skills/spec\n" +
+		"# <<< kitt\n"
+
+	path := filepath.Join(project, ".gitignore")
+	testutil.WriteFile(t, path, prefix+oldBlock+suffix)
+
+	mustRestore(t, project)
+
+	want := prefix + kittBlock(true) + suffix
+	if got := readText(t, path); got != want {
+		t.Fatalf("gitignore =\n%s\nwant\n%s", got, want)
+	}
+
+	n, out := mustDoctor(t, project)
+	if n != 0 || out != "ok\n" {
+		t.Fatalf("Doctor = %d, output = %q", n, out)
+	}
+}
+
 func TestDocsIndexUsesNameOrderAndKeepsOutside(t *testing.T) {
 	project, _ := standard(t)
 	agents := filepath.Join(project, "AGENTS.md")

@@ -100,6 +100,27 @@ func TestDoctorMissingClaudeMD(t *testing.T) {
 	assertSingleProblem(t, project, "missing: CLAUDE.md (run kitt install)")
 }
 
+func TestDoctorCustomClaudeMD(t *testing.T) {
+	project, _ := standard(t)
+	testutil.WriteFile(t, filepath.Join(project, "AGENTS.md"), "# Project\n")
+	testutil.WriteFile(t, filepath.Join(project, "CLAUDE.md"), "# custom instructions\n")
+	mustAdd(t, project, "demo/review@^1")
+
+	n, out := mustDoctor(t, project)
+	if n != 0 || out != "ok\n" {
+		t.Fatalf("Doctor = %d, output = %q", n, out)
+	}
+	if strings.Contains(out, "outdated: .gitignore kitt block") {
+		t.Fatalf("unexpected outdated gitignore problem:\n%s", out)
+	}
+
+	mustRestore(t, project)
+	n, out = mustDoctor(t, project)
+	if n != 0 || out != "ok\n" {
+		t.Fatalf("Doctor after restore = %d, output = %q", n, out)
+	}
+}
+
 func TestDoctorOutdatedDocsIndex(t *testing.T) {
 	project := healthyProject(t)
 	path := filepath.Join(project, "AGENTS.md")
