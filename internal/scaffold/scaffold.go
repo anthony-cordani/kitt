@@ -182,7 +182,9 @@ const (
 	hookStart = "# >>> kitt (managed by kitt, do not edit)"
 	hookEnd   = "# <<< kitt"
 	hookBlock = hookStart + "\n" +
-		"if command -v kitt >/dev/null 2>&1; then\n" +
+		"if [ ! -f kitt.toml ]; then\n" +
+		"  :\n" +
+		"elif command -v kitt >/dev/null 2>&1; then\n" +
 		"  kitt install >/dev/null || echo \"kitt: install failed, run kitt install\" >&2\n" +
 		"else\n" +
 		"  echo \"kitt: not in PATH, skills not synced\" >&2\n" +
