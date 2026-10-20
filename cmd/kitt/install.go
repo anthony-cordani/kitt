@@ -59,6 +59,9 @@ func installCmd(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "kitt install: %v\n", err)
 			return 1
 		}
+		if fs.NArg() == 0 {
+			return 0
+		}
 	}
 	switch fs.NArg() {
 	case 0:
