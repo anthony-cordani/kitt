@@ -53,7 +53,7 @@ func Init(opts Options) error {
 		return fmt.Errorf("install skills: %w", err)
 	}
 	if createdAgents {
-		fmt.Fprintln(opts.Out, "next: open your AI assistant in this project, it will run the kitt-bootstrap skill")
+		fmt.Fprintln(opts.Out, "next: ask your AI assistant to set up the project (kitt-bootstrap skill)")
 	}
 	return nil
 }

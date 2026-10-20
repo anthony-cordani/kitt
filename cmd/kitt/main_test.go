@@ -97,7 +97,22 @@ func TestRunDoctorExitCodes(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	t.Run("pending setup", func(t *testing.T) {
+		t.Chdir(project)
+		code, stdout, stderr := runDoctor()
+		if code != 2 || !strings.Contains(stdout, "pending: AGENTS.md setup") {
+			t.Fatalf("exit %d, want 2\nstdout: %s\nstderr: %s", code, stdout, stderr)
+		}
+	})
 	t.Run("healthy", func(t *testing.T) {
+		agents := filepath.Join(project, "AGENTS.md")
+		data, err := os.ReadFile(agents)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body := strings.Replace(string(data), "<!-- kitt:bootstrap -->\r\n", "", 1)
+		body = strings.Replace(body, "<!-- kitt:bootstrap -->\n", "", 1)
+		testutil.WriteFile(t, agents, body)
 		t.Chdir(project)
 		code, stdout, stderr := runDoctor()
 		if code != 0 {
