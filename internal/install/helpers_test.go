@@ -204,18 +204,12 @@ func assertNoTempDirs(t *testing.T, root string) {
 	}
 }
 
-// kittBlock is the managed .gitignore section for names, in name order.
-func kittBlock(names []string, claude bool) string {
-	sorted := append([]string(nil), names...)
-	sort.Strings(sorted)
+// kittBlock is the managed .gitignore section.
+func kittBlock(claude bool) string {
 	var b strings.Builder
 	b.WriteString("# >>> kitt (managed by kitt, do not edit)\n")
 	b.WriteString("/.agents/skills/\n")
-	for _, name := range sorted {
-		b.WriteString("/.claude/skills/")
-		b.WriteString(name)
-		b.WriteByte('\n')
-	}
+	b.WriteString("/.claude/skills/\n")
 	if claude {
 		b.WriteString("/CLAUDE.md\n")
 	}

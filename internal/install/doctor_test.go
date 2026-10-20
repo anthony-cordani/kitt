@@ -91,8 +91,11 @@ func TestDoctorOutdatedGitignore(t *testing.T) {
 
 func TestDoctorMissingClaudeMD(t *testing.T) {
 	project, _ := standard(t)
-	mustAdd(t, project, "demo/review@^1")
 	testutil.WriteFile(t, filepath.Join(project, "AGENTS.md"), "# Agents\n")
+	mustAdd(t, project, "demo/review@^1")
+	if err := os.Remove(filepath.Join(project, "CLAUDE.md")); err != nil {
+		t.Fatal(err)
+	}
 
 	assertSingleProblem(t, project, "missing: CLAUDE.md (run kitt install)")
 }

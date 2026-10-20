@@ -43,10 +43,8 @@ func finish(p paths, names []string, prune bool, out io.Writer) error {
 		names = append(names, templates.BootstrapSkill)
 		sort.Strings(names)
 	}
-	claudeManaged := false
 	if agentsExists {
-		claudeManaged, err = syncClaudeMD(p.root, out)
-		if err != nil {
+		if _, err := syncClaudeMD(p.root, out); err != nil {
 			return err
 		}
 		if err := syncDocsIndex(p.root, agentsPath, string(agents), out); err != nil {
@@ -61,7 +59,7 @@ func finish(p paths, names []string, prune bool, out io.Writer) error {
 	if err := syncLinks(p, names, previouslyInstalled, out); err != nil {
 		return err
 	}
-	return writeGitignore(p.root, names, claudeManaged)
+	return writeGitignore(p.root, agentsExists)
 }
 
 func syncBootstrap(p paths, active bool) error {

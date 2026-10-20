@@ -132,11 +132,11 @@ func (d *doctor) links(names []string) error {
 }
 
 func (d *doctor) project(names []string, agents string, agentsExists bool) error {
-	claudeExists, claudeManaged, err := claudeState(d.p.root, agentsExists)
+	claudeExists, _, err := claudeState(d.p.root, agentsExists)
 	if err != nil {
 		return err
 	}
-	if err := d.gitignore(names, claudeManaged); err != nil {
+	if err := d.gitignore(agentsExists); err != nil {
 		return err
 	}
 	if agentsExists && !claudeExists {
@@ -148,7 +148,7 @@ func (d *doctor) project(names []string, agents string, agentsExists bool) error
 	return d.staleDocs()
 }
 
-func (d *doctor) gitignore(names []string, claudeManaged bool) error {
+func (d *doctor) gitignore(agentsExists bool) error {
 	data, err := os.ReadFile(filepath.Join(d.p.root, ".gitignore"))
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("read .gitignore: %w", err)
@@ -157,7 +157,7 @@ func (d *doctor) gitignore(names []string, claudeManaged bool) error {
 	if start, end, ok := findManagedBlock(string(data)); ok {
 		current = string(data)[start:end]
 	}
-	if current != renderGitignore(names, claudeManaged) {
+	if current != renderGitignore(agentsExists) {
 		d.line("outdated: .gitignore kitt block (run kitt install)")
 	}
 	return nil
