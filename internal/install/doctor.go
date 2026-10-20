@@ -54,7 +54,7 @@ func Doctor(opts Options) (int, error) {
 		return 0, err
 	}
 	if !p.global {
-		if err := d.project(managed, agents, agentsExists); err != nil {
+		if err := d.project(agents, agentsExists); err != nil {
 			return 0, err
 		}
 	}
@@ -131,12 +131,12 @@ func (d *doctor) links(names []string) error {
 	return nil
 }
 
-func (d *doctor) project(names []string, agents string, agentsExists bool) error {
-	claudeExists, claudeManaged, err := claudeState(d.p.root, agentsExists)
+func (d *doctor) project(agents string, agentsExists bool) error {
+	claudeExists, err := claudeState(d.p.root)
 	if err != nil {
 		return err
 	}
-	if err := d.gitignore(names, claudeManaged); err != nil {
+	if err := d.gitignore(agentsExists); err != nil {
 		return err
 	}
 	if agentsExists && !claudeExists {
@@ -148,7 +148,7 @@ func (d *doctor) project(names []string, agents string, agentsExists bool) error
 	return d.staleDocs()
 }
 
-func (d *doctor) gitignore(names []string, claudeManaged bool) error {
+func (d *doctor) gitignore(agentsExists bool) error {
 	data, err := os.ReadFile(filepath.Join(d.p.root, ".gitignore"))
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("read .gitignore: %w", err)
@@ -157,7 +157,7 @@ func (d *doctor) gitignore(names []string, claudeManaged bool) error {
 	if start, end, ok := findManagedBlock(string(data)); ok {
 		current = string(data)[start:end]
 	}
-	if current != renderGitignore(names, claudeManaged) {
+	if current != renderGitignore(agentsExists) {
 		d.line("outdated: .gitignore kitt block (run kitt install)")
 	}
 	return nil
@@ -273,15 +273,15 @@ func readAgents(root string) (string, bool, error) {
 	return string(data), true, nil
 }
 
-func claudeState(root string, agentsExists bool) (bool, bool, error) {
-	data, err := os.ReadFile(filepath.Join(root, "CLAUDE.md"))
+func claudeState(root string) (bool, error) {
+	_, err := os.ReadFile(filepath.Join(root, "CLAUDE.md"))
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return false, false, nil
+			return false, nil
 		}
-		return false, false, fmt.Errorf("read CLAUDE.md: %w", err)
+		return false, fmt.Errorf("read CLAUDE.md: %w", err)
 	}
-	return true, agentsExists && string(data) == templates.ClaudeMD, nil
+	return true, nil
 }
 
 func skillLink(global bool, name string) string {

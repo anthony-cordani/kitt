@@ -10,6 +10,7 @@ import (
 	"github.com/anthony-cordani/kitt/internal/install"
 	"github.com/anthony-cordani/kitt/internal/manifest"
 	"github.com/anthony-cordani/kitt/internal/skill"
+	"github.com/anthony-cordani/kitt/internal/templates"
 	"github.com/anthony-cordani/kitt/internal/testutil"
 )
 
@@ -236,7 +237,7 @@ func TestGitignoreBlockPreservesOutsideBytes(t *testing.T) {
 	mustAdd(t, project, "demo/review@^1")
 
 	got := readText(t, path)
-	want := prefix + kittBlock([]string{"review"}, false)
+	want := prefix + kittBlock(false)
 	if got != want {
 		t.Fatalf("gitignore =\n%s\nwant\n%s", got, want)
 	}
@@ -281,7 +282,7 @@ func TestProjectBootstrapInstallAndRemoval(t *testing.T) {
 	if readText(t, filepath.Join(project, "CLAUDE.md")) != "@AGENTS.md\n" {
 		t.Fatalf("CLAUDE.md = %q", readText(t, filepath.Join(project, "CLAUDE.md")))
 	}
-	block := kittBlock([]string{"kitt-bootstrap", "review"}, true)
+	block := kittBlock(true)
 	if readText(t, filepath.Join(project, ".gitignore")) != block {
 		t.Fatalf("gitignore =\n%s\nwant\n%s", readText(t, filepath.Join(project, ".gitignore")), block)
 	}
@@ -291,7 +292,7 @@ func TestProjectBootstrapInstallAndRemoval(t *testing.T) {
 
 	assertMissing(t, boot)
 	assertMissing(t, claudePath(project, "kitt-bootstrap"))
-	block = kittBlock([]string{"review"}, true)
+	block = kittBlock(true)
 	if readText(t, filepath.Join(project, ".gitignore")) != block {
 		t.Fatalf("gitignore after removal =\n%s\nwant\n%s", readText(t, filepath.Join(project, ".gitignore")), block)
 	}
@@ -312,11 +313,110 @@ func TestExistingClaudeMDIsUntouched(t *testing.T) {
 		t.Fatalf("CLAUDE.md = %q", readText(t, filepath.Join(project, "CLAUDE.md")))
 	}
 	got := readText(t, filepath.Join(project, ".gitignore"))
-	if got != kittBlock([]string{"review"}, false) {
-		t.Fatalf("gitignore =\n%s", got)
+	if got != kittBlock(true) {
+		t.Fatalf("gitignore =\n%s\nwant\n%s", got, kittBlock(true))
 	}
+	if !strings.Contains(got, "/CLAUDE.md") {
+		t.Fatalf("CLAUDE.md is not in the block:\n%s", got)
+	}
+}
+
+func TestGitignoreByteIdenticalForCustomAndTemplateClaudeMD(t *testing.T) {
+	p1, _ := standard(t)
+	testutil.WriteFile(t, filepath.Join(p1, "AGENTS.md"), "# Project\n")
+	testutil.WriteFile(t, filepath.Join(p1, "CLAUDE.md"), "# custom instructions\n")
+	mustAdd(t, p1, "demo/review@^1")
+
+	p2, _ := newPair(t)
+	testutil.WriteFile(t, filepath.Join(p2, "kitt.toml"), readText(t, filepath.Join(p1, "kitt.toml")))
+	testutil.WriteFile(t, filepath.Join(p2, "AGENTS.md"), "# Project\n")
+	testutil.WriteFile(t, filepath.Join(p2, "CLAUDE.md"), templates.ClaudeMD)
+	mustRestore(t, p2)
+
+	got1 := readText(t, filepath.Join(p1, ".gitignore"))
+	got2 := readText(t, filepath.Join(p2, ".gitignore"))
+
+	if !strings.Contains(got1, "/CLAUDE.md\n") {
+		t.Fatalf("custom project .gitignore missing /CLAUDE.md:\n%s", got1)
+	}
+	if got1 != got2 {
+		t.Fatalf(".gitignore not byte-identical between machines:\nmachine 1 (custom):\n%s\nmachine 2 (template):\n%s", got1, got2)
+	}
+}
+
+func TestGitignoreTwoInstalledSkillsHasSingleSkillsLine(t *testing.T) {
+	project, skills := standard(t)
+	release(t, skills, "helper", "1.0.0")
+
+	mustAdd(t, project, "demo/review@^1")
+	mustAdd(t, project, "demo/helper@^1")
+
+	got := readText(t, filepath.Join(project, ".gitignore"))
+	if strings.Count(got, "/.claude/skills/\n") != 1 {
+		t.Fatalf("expected exactly one /.claude/skills/ line, got:\n%s", got)
+	}
+	if strings.Contains(got, "/.claude/skills/review") {
+		t.Fatalf("block contains per-skill review line:\n%s", got)
+	}
+	if strings.Contains(got, "/.claude/skills/helper") {
+		t.Fatalf("block contains per-skill helper line:\n%s", got)
+	}
+}
+
+func TestGitignoreWithoutAgentsMDOmitsClaudeMD(t *testing.T) {
+	project, skills := standard(t)
+	mustAdd(t, project, "demo/review@^1")
+
+	got := readText(t, filepath.Join(project, ".gitignore"))
 	if strings.Contains(got, "/CLAUDE.md") {
-		t.Fatalf("CLAUDE.md is in the block:\n%s", got)
+		t.Fatalf("block contains /CLAUDE.md without AGENTS.md:\n%s", got)
+	}
+	if got != kittBlock(false) {
+		t.Fatalf("gitignore =\n%s\nwant\n%s", got, kittBlock(false))
+	}
+
+	p2, _ := newPair(t)
+	writeKitt(t, p2, map[string]string{"demo": testutil.URL(skills)})
+	testutil.WriteFile(t, filepath.Join(p2, "CLAUDE.md"), templates.ClaudeMD)
+	mustAdd(t, p2, "demo/review@^1")
+
+	got2 := readText(t, filepath.Join(p2, ".gitignore"))
+	if strings.Contains(got2, "/CLAUDE.md") {
+		t.Fatalf("block contains /CLAUDE.md without AGENTS.md:\n%s", got2)
+	}
+	if got2 != kittBlock(false) {
+		t.Fatalf("gitignore =\n%s\nwant\n%s", got2, kittBlock(false))
+	}
+}
+
+func TestGitignoreMigrationFromOldBlock(t *testing.T) {
+	project, skills := standard(t)
+	release(t, skills, "spec", "1.0.0")
+	testutil.WriteFile(t, filepath.Join(project, "AGENTS.md"), "# Project\n")
+	mustAdd(t, project, "demo/review@^1")
+	mustAdd(t, project, "demo/spec@^1")
+
+	const prefix = "node_modules/\n"
+	const suffix = "\n# local\n*.log\n"
+	const oldBlock = "# >>> kitt (managed by kitt, do not edit)\n" +
+		"/.agents/skills/\n" +
+		"/.claude/skills/review\n" +
+		"/.claude/skills/spec\n" +
+		"# <<< kitt\n"
+
+	path := filepath.Join(project, ".gitignore")
+	testutil.WriteFile(t, path, prefix+oldBlock+suffix)
+
+	mustRestore(t, project)
+
+	want := prefix + kittBlock(true) + suffix
+	if got := readText(t, path); got != want {
+		t.Fatalf("gitignore =\n%s\nwant\n%s", got, want)
+	}
+
+	n, out := mustDoctor(t, project)
+	if n != 0 || out != "ok\n" {
+		t.Fatalf("Doctor = %d, output = %q", n, out)
 	}
 }
 

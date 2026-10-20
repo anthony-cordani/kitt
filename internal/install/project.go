@@ -43,10 +43,8 @@ func finish(p paths, names []string, prune bool, out io.Writer) error {
 		names = append(names, templates.BootstrapSkill)
 		sort.Strings(names)
 	}
-	claudeManaged := false
 	if agentsExists {
-		claudeManaged, err = syncClaudeMD(p.root, out)
-		if err != nil {
+		if err := syncClaudeMD(p.root, out); err != nil {
 			return err
 		}
 		if err := syncDocsIndex(p.root, agentsPath, string(agents), out); err != nil {
@@ -61,7 +59,7 @@ func finish(p paths, names []string, prune bool, out io.Writer) error {
 	if err := syncLinks(p, names, previouslyInstalled, out); err != nil {
 		return err
 	}
-	return writeGitignore(p.root, names, claudeManaged)
+	return writeGitignore(p.root, agentsExists)
 }
 
 func syncBootstrap(p paths, active bool) error {
@@ -109,20 +107,20 @@ func syncBootstrap(p paths, active bool) error {
 	return p.installed.add(templates.BootstrapSkill)
 }
 
-func syncClaudeMD(root string, out io.Writer) (bool, error) {
+func syncClaudeMD(root string, out io.Writer) error {
 	path := filepath.Join(root, "CLAUDE.md")
-	data, err := os.ReadFile(path)
+	_, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		if err := os.WriteFile(path, []byte(templates.ClaudeMD), 0o644); err != nil {
-			return false, fmt.Errorf("write CLAUDE.md: %w", err)
+			return fmt.Errorf("write CLAUDE.md: %w", err)
 		}
 		fmt.Fprintln(out, "created CLAUDE.md")
-		return true, nil
+		return nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("read CLAUDE.md: %w", err)
+		return fmt.Errorf("read CLAUDE.md: %w", err)
 	}
-	return string(data) == templates.ClaudeMD, nil
+	return nil
 }
 
 func syncDocsIndex(root, agentsPath, agents string, out io.Writer) error {
