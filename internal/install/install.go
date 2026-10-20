@@ -207,12 +207,11 @@ func Add(opts Options, ref string) error {
 	return nil
 }
 
-// AddSources adds sources to the user-level kitt.toml, creating the file when it is missing.
-// Every URL is checked before anything is written; an alias already set to another URL is an error.
+// AddSources adds sources to the target's kitt.toml: the user-level one with -g, created when it
+// is missing, or the project's one, which must already exist (creating a project is kitt init's
+// job). Only kitt.toml is written. Every URL is checked before anything is written; an alias
+// already set to another URL is an error, one already set to the same URL is a no-op.
 func AddSources(opts Options, sources map[string]string) error {
-	if !opts.Global {
-		return fmt.Errorf("--source needs -g: in a project, use kitt init --source")
-	}
 	p, err := locate(opts)
 	if err != nil {
 		return err
@@ -220,6 +219,9 @@ func AddSources(opts Options, sources map[string]string) error {
 	m, err := manifest.Load(p.manifest)
 	created := false
 	if errors.Is(err, fs.ErrNotExist) {
+		if !p.global {
+			return fmt.Errorf("no kitt.toml here: run kitt init --source <alias>=<url>")
+		}
 		m = &manifest.Manifest{Sources: map[string]string{}, Skills: map[string]*manifest.Skill{}}
 		created = true
 	} else if err != nil {

@@ -15,12 +15,12 @@ func installCmd(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	fs.Usage = func() {
-		fmt.Fprintln(stderr, "Usage: kitt install [-g [--source alias=url]...] [[source/]skill[@constraint]]")
+		fmt.Fprintln(stderr, "Usage: kitt install [-g] [--source alias=url]... [[source/]skill[@constraint]]")
 		fs.PrintDefaults()
 	}
 	global := fs.Bool("g", false, "install at user level instead of the current project")
 	sources := sourceFlags{}
-	fs.Var(sources, "source", "with -g: add a skills repository `alias=url` to the user kitt.toml, creating it if needed (repeatable)")
+	fs.Var(sources, "source", "add a skills repository `alias=url` to the project kitt.toml, or with -g to the user kitt.toml, creating it if needed (repeatable)")
 	// Move flags ahead of positional arguments; --source takes the next argument as its value.
 	var flags, positional []string
 	for i := 0; i < len(args); i++ {
