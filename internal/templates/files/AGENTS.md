@@ -1,7 +1,7 @@
 # AGENTS.md
 
 <!-- kitt:bootstrap -->
-> **Setup pending.** This project was just initialised by kitt. Before any other task, run the `kitt-bootstrap` skill (if your tool has no skills, read `.agents/skills/kitt-bootstrap/SKILL.md` and follow it).
+> **Setup pending.** kitt initialised this project but the `kitt-bootstrap` skill has not run yet. Run it only when the user asks you to set up the project (if your tool has no skills, read `.agents/skills/kitt-bootstrap/SKILL.md`). For any other request, ignore this note and do the task.
 
 ## Project
 

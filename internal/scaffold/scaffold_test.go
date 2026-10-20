@@ -17,7 +17,7 @@ import (
 	"github.com/anthony-cordani/kitt/internal/testutil"
 )
 
-const nextLine = "next: open your AI assistant in this project, it will run the kitt-bootstrap skill"
+const nextLine = "next: ask your AI assistant to set up the project (kitt-bootstrap skill)"
 
 func TestInitCreatesProjectFiles(t *testing.T) {
 	testutil.IsolateHome(t)
@@ -48,6 +48,9 @@ func TestInitCreatesProjectFiles(t *testing.T) {
 		if !strings.Contains(string(agents), marker) {
 			t.Errorf("AGENTS.md missing %s", marker)
 		}
+	}
+	if strings.Contains(string(agents), "Before any other task") {
+		t.Errorf("AGENTS.md setup note diverts unrelated tasks:\n%s", agents)
 	}
 	requireTemplate(t, repo, "RULES.md", "files/RULES.md")
 	requireTemplate(t, repo, ".agents/docs/README.md", "files/docs/README.md")

@@ -10,7 +10,7 @@ import (
 	"github.com/anthony-cordani/kitt/internal/testutil"
 )
 
-const healthyAgents = "# Project\n\n<!-- kitt:bootstrap -->\n\n<!-- kitt:docs:start -->\n<!-- kitt:docs:end -->\n"
+const healthyAgents = "# Project\n\n<!-- kitt:docs:start -->\n<!-- kitt:docs:end -->\n"
 
 func healthyProject(t *testing.T) string {
 	t.Helper()
@@ -196,6 +196,24 @@ func TestDoctorNotPinned(t *testing.T) {
 	}
 
 	assertSingleProblem(t, project, "not pinned: review (run kitt install)")
+}
+
+func TestDoctorPendingBootstrap(t *testing.T) {
+	project := healthyProject(t)
+	testutil.WriteFile(t, filepath.Join(project, "AGENTS.md"), "# Project\n\n<!-- kitt:bootstrap -->\n\n<!-- kitt:docs:start -->\n<!-- kitt:docs:end -->\n")
+	mustRestore(t, project)
+
+	assertSingleProblem(t, project, "pending: AGENTS.md setup (ask your AI assistant to run the kitt-bootstrap skill)")
+}
+
+func TestDoctorNoPendingWithoutBootstrapMarker(t *testing.T) {
+	project := healthyProject(t)
+
+	_, out := mustDoctor(t, project)
+
+	if strings.Contains(out, "pending:") {
+		t.Fatalf("unexpected pending problem:\n%s", out)
+	}
 }
 
 func TestDoctorChangesNothing(t *testing.T) {

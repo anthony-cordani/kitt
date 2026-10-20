@@ -142,6 +142,9 @@ func (d *doctor) project(agents string, agentsExists bool) error {
 	if agentsExists && !claudeExists {
 		d.line("missing: CLAUDE.md (run kitt install)")
 	}
+	if agentsExists && bootstrapActive(agents) {
+		d.line("pending: AGENTS.md setup (ask your AI assistant to run the kitt-bootstrap skill)")
+	}
 	if err := d.docs(agents); err != nil {
 		return err
 	}
