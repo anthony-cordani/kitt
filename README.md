@@ -32,7 +32,7 @@ kitt install review@^1     # adds a skill, pins it in kitt.toml
 git add -A && git commit -m "Set up AI assistants"
 ```
 
-Then open your AI assistant in the project. On a new `AGENTS.md`, it runs the `kitt-bootstrap` skill first: it fills in `AGENTS.md` from the code, proposes rules in `RULES.md`, writes the first project docs, then removes the setup marker.
+Then open your AI assistant in the project and ask it to set up the project. It runs the `kitt-bootstrap` skill: it fills in `AGENTS.md` from the code, proposes rules in `RULES.md`, writes the first project docs, then removes the setup marker.
 
 A teammate who clones the project runs `kitt install` once; after that, a git hook keeps the skills in sync on every pull and checkout.
 
