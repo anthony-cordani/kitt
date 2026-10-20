@@ -65,7 +65,7 @@ kitt never overwrites a file it did not create. On a project that already has an
 | `kitt release <skill>` | In a skills repository: tags and pushes a new version of a skill (see below). |
 | `kitt --version` | Prints the installed version. |
 
-`install`, `upgrade`, `list` and `doctor` take `-g` to work on user-level skills instead of the current project. The first time, give the skills repository: `kitt install -g --source alias=url <skill>` creates the user `kitt.toml` (repeatable `--source`, `-g` only).
+`install`, `upgrade`, `list` and `doctor` take `-g` to work on user-level skills instead of the current project. The first time, give the skills repository: `kitt install -g --source alias=url <skill>` creates the user `kitt.toml` (repeatable `--source`). In a project that already has a `kitt.toml`, `kitt install --source alias=url` adds the source to it.
 
 ### Version constraints
 

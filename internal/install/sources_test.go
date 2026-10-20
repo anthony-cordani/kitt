@@ -117,11 +117,66 @@ func TestAddSourcesSameURLIsNoop(t *testing.T) {
 	}
 }
 
-func TestAddSourcesRequiresGlobal(t *testing.T) {
-	testutil.IsolateHome(t)
-	opt, _ := withOpts(t.TempDir(), false)
-	err := install.AddSources(opt, map[string]string{"s": "file:///no/such/repo"})
-	if err == nil || !strings.Contains(err.Error(), "--source needs -g") {
+func TestAddSourcesProjectAddsToProjectManifestOnly(t *testing.T) {
+	project, skills := standard(t)
+	other := testutil.NewRepo(t)
+	testutil.WriteFile(t, filepath.Join(project, "AGENTS.md"), "# agents\n")
+	testutil.WriteFile(t, filepath.Join(project, "RULES.md"), "# rules\n")
+	testutil.WriteFile(t, filepath.Join(project, "CLAUDE.md"), "# claude\n")
+	testutil.WriteFile(t, filepath.Join(project, ".gitignore"), "/node_modules/\n")
+	testutil.WriteFile(t, filepath.Join(project, ".agents", "docs", "notes.md"), "notes\n")
+	mf := filepath.Join(project, manifest.FileName)
+	before := snapshot(t, project)
+	delete(before, manifest.FileName)
+
+	opt, buf := withOpts(project, false)
+	if err := install.AddSources(opt, map[string]string{"other": testutil.URL(other)}); err != nil {
+		t.Fatalf("AddSources: %v", err)
+	}
+	if out := buf.String(); out != "added source other\n" {
+		t.Fatalf("output = %q", out)
+	}
+	m := loadManifest(t, mf)
+	if m.Sources["other"] != testutil.URL(other) || m.Sources["demo"] != testutil.URL(skills) {
+		t.Fatalf("sources = %v", m.Sources)
+	}
+	after := snapshot(t, project)
+	delete(after, manifest.FileName)
+	assertSameTree(t, before, after)
+	globalMf, err := manifest.GlobalPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertMissing(t, globalMf)
+}
+
+func TestAddSourcesProjectRejectsDifferentURL(t *testing.T) {
+	project, _ := standard(t)
+	other := testutil.NewRepo(t)
+	before := snapshot(t, project)
+
+	opt, _ := withOpts(project, false)
+	err := install.AddSources(opt, map[string]string{"demo": testutil.URL(other)})
+	if err == nil || !strings.Contains(err.Error(), "already set") {
 		t.Fatalf("AddSources err = %v", err)
 	}
+	assertSameTree(t, before, snapshot(t, project))
+}
+
+func TestAddSourcesProjectWithoutManifestCreatesNothing(t *testing.T) {
+	testutil.IsolateHome(t)
+	project := t.TempDir()
+	repo := testutil.NewRepo(t)
+
+	opt, _ := withOpts(project, false)
+	err := install.AddSources(opt, map[string]string{"s": testutil.URL(repo)})
+	if err == nil || !strings.Contains(err.Error(), "no kitt.toml here: run kitt init --source <alias>=<url>") {
+		t.Fatalf("AddSources err = %v", err)
+	}
+	assertSameTree(t, map[string]string{}, snapshot(t, project))
+	mf, err := manifest.GlobalPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertMissing(t, mf)
 }
