@@ -110,7 +110,9 @@ func TestRunDoctorExitCodes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		testutil.WriteFile(t, agents, strings.Replace(string(data), "<!-- kitt:bootstrap -->\n", "", 1))
+		body := strings.Replace(string(data), "<!-- kitt:bootstrap -->\r\n", "", 1)
+		body = strings.Replace(body, "<!-- kitt:bootstrap -->\n", "", 1)
+		testutil.WriteFile(t, agents, body)
 		t.Chdir(project)
 		code, stdout, stderr := runDoctor()
 		if code != 0 {
