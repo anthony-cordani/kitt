@@ -17,12 +17,20 @@ const installedFile = ".kitt-installed"
 
 // installedState records directories created by kitt, independently of the manifest.
 type installedState struct {
-	dir   string
-	names map[string]bool
+	dir      string
+	names    map[string]bool
+	deferred bool
+	dirty    bool
 }
 
 func readInstalled(p paths, m *manifest.Manifest) (*installedState, error) {
-	state := &installedState{dir: p.skillsDir, names: map[string]bool{}}
+	return readInstalledWithMode(p, m, false)
+}
+
+// Deferred reads and adoption collect ownership evidence without writing state.
+// Install/restore flush it only after the entire graph and staged content validate.
+func readInstalledWithMode(p paths, m *manifest.Manifest, deferred bool) (*installedState, error) {
+	state := &installedState{dir: p.skillsDir, names: map[string]bool{}, deferred: deferred}
 	data, err := os.ReadFile(filepath.Join(p.skillsDir, installedFile))
 	if err == nil {
 		for _, name := range strings.Split(string(data), "\n") {
@@ -124,6 +132,10 @@ func (s *installedState) remove(name string) error {
 }
 
 func (s *installedState) save() error {
+	if s.deferred {
+		s.dirty = true
+		return nil
+	}
 	names := make([]string, 0, len(s.names))
 	for name := range s.names {
 		names = append(names, name)

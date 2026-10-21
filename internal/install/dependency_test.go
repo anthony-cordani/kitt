@@ -1,0 +1,502 @@
+package install_test
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"reflect"
+	"slices"
+	"strings"
+	"testing"
+
+	"github.com/anthony-cordani/kitt/internal/dependency"
+	"github.com/anthony-cordani/kitt/internal/install"
+	"github.com/anthony-cordani/kitt/internal/manifest"
+	"github.com/anthony-cordani/kitt/internal/skill"
+	"github.com/anthony-cordani/kitt/internal/testutil"
+)
+
+type dependencyFixture struct {
+	root, repo, path string
+	opts             install.Options
+}
+
+func dependencyScope(t *testing.T, global bool) dependencyFixture {
+	t.Helper()
+	home := testutil.IsolateHome(t)
+	project, repo := testutil.NewRepo(t), testutil.NewRepo(t)
+	root, path := project, filepath.Join(project, manifest.FileName)
+	if global {
+		root = home
+		var err error
+		path, err = manifest.GlobalPath()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	testutil.WriteFile(t, path, fmt.Sprintf("[sources]\ndemo = %q\n", testutil.URL(repo)))
+	return dependencyFixture{root: root, repo: repo, path: path, opts: install.Options{Root: project, Global: global}}
+}
+
+func dependencyRelease(t *testing.T, repo, name, version string, requires ...string) {
+	t.Helper()
+	testutil.WriteSkillRequires(t, repo, name, version, requires)
+	testutil.Commit(t, repo, name+" "+version)
+	testutil.Git(t, repo, "tag", name+"/v"+version)
+}
+
+func (f dependencyFixture) add(t *testing.T, ref string) {
+	t.Helper()
+	if err := install.Add(f.opts, ref); err != nil {
+		t.Fatalf("Add %s: %v", ref, err)
+	}
+}
+
+func (f dependencyFixture) restore(t *testing.T) {
+	t.Helper()
+	if err := install.Restore(f.opts); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+}
+
+func (f dependencyFixture) save(t *testing.T, m *manifest.Manifest) {
+	t.Helper()
+	if err := m.Save(f.path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Global source caches may change during planning. Snapshot only managed state.
+func (f dependencyFixture) snapshot(t *testing.T) map[string]string {
+	t.Helper()
+	got := map[string]string{"manifest": readText(t, f.path)}
+	for _, dir := range []string{".agents", ".claude"} {
+		path := filepath.Join(f.root, dir)
+		if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		got[dir] = "dir"
+		for path, value := range snapshot(t, path) {
+			got[filepath.Join(dir, path)] = value
+		}
+	}
+	return got
+}
+
+func removeSourceAndCache(t *testing.T, repo string) {
+	t.Helper()
+	if err := os.RemoveAll(repo); err != nil {
+		t.Fatal(err)
+	}
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(cache, "kitt")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertUntouchedError(t *testing.T, err error, contains string) {
+	t.Helper()
+	var pe *dependency.PlanError
+	if err == nil || !strings.Contains(err.Error(), contains) || !errors.As(err, &pe) || !pe.ManagedStateUntouched {
+		t.Fatalf("error = %v; want untouched PlanError containing %q", err, contains)
+	}
+}
+
+func TestDependencyInstallGraph(t *testing.T) {
+	for _, global := range []bool{false, true} {
+		for _, diamond := range []bool{false, true} {
+			t.Run(fmt.Sprintf("global=%t/diamond=%t", global, diamond), func(t *testing.T) {
+				f := dependencyScope(t, global)
+				dependencyRelease(t, f.repo, "leaf", "1.0.0")
+				dependencyRelease(t, f.repo, "left", "1.0.0", "leaf@^1")
+				requires := []string{"left@^1"}
+				parents := []string{"left"}
+				if diamond {
+					dependencyRelease(t, f.repo, "right", "1.0.0", "leaf@^1.0")
+					requires = append(requires, "demo/right@^1")
+					parents = append(parents, "right")
+				}
+				dependencyRelease(t, f.repo, "root", "1.0.0", requires...)
+				f.add(t, "root")
+				m := loadManifest(t, f.path)
+				if !slices.Equal(m.Skills["leaf"].Via, parents) {
+					t.Fatalf("leaf via = %v, want %v", m.Skills["leaf"].Via, parents)
+				}
+				for name, s := range m.Skills {
+					if s.IsDirect() != (name == "root") || (name != "root" && (s.Direct == nil || s.Version != "")) {
+						t.Fatalf("direct/constraint for %s: %+v", name, s)
+					}
+					if s.Resolved == nil || s.Resolved.Requires == nil {
+						t.Fatalf("%s missing pin snapshot: %+v", name, s)
+					}
+					if name == "leaf" && len(*s.Resolved.Requires) != 0 {
+						t.Fatalf("leaf requires = %v", *s.Resolved.Requires)
+					}
+					for _, ref := range *s.Resolved.Requires {
+						if !strings.HasPrefix(ref, "demo/") {
+							t.Fatalf("unnormalized requirement %q", ref)
+						}
+					}
+					assertLinkResolves(t, claudePath(f.root, name), skillPath(f.root, name))
+					sum, err := skill.Hash(skillPath(f.root, name))
+					if err != nil || sum != s.Resolved.Hash {
+						t.Fatalf("installed %s hash = %s, err %v", name, sum, err)
+					}
+				}
+				assertNoTempDirs(t, f.root)
+			})
+		}
+	}
+}
+
+func TestDependencyDirectPromotionKeepsPinAndVia(t *testing.T) {
+	for _, global := range []bool{false, true} {
+		t.Run(fmt.Sprint(global), func(t *testing.T) {
+			f := dependencyScope(t, global)
+			dependencyRelease(t, f.repo, "leaf", "1.0.0")
+			dependencyRelease(t, f.repo, "root", "1.0.0", "leaf@^1")
+			f.add(t, "root")
+			m := loadManifest(t, f.path)
+			pin := *m.Skills["leaf"].Resolved
+			m.Sources["other"] = "file:///unreachable-unused"
+			f.save(t, m)
+			dependencyRelease(t, f.repo, "leaf", "1.9.0")
+			removeSourceAndCache(t, f.repo)
+			f.add(t, "leaf")
+			s := loadManifest(t, f.path).Skills["leaf"]
+			if !s.IsDirect() || s.Version != "" || !slices.Equal(s.Via, []string{"root"}) || !reflect.DeepEqual(*s.Resolved, pin) {
+				t.Fatalf("promotion changed pin/graph: %+v, pin %+v", s, s.Resolved)
+			}
+			assertNoTempDirs(t, f.root)
+		})
+	}
+}
+
+func TestDependencyUnresolvedRestoreKeepsExistingPins(t *testing.T) {
+	for _, global := range []bool{false, true} {
+		t.Run(fmt.Sprint(global), func(t *testing.T) {
+			f := dependencyScope(t, global)
+			dependencyRelease(t, f.repo, "shared", "1.0.0")
+			f.add(t, "shared")
+			old := *loadManifest(t, f.path).Skills["shared"].Resolved
+			dependencyRelease(t, f.repo, "shared", "1.9.0")
+			dependencyRelease(t, f.repo, "leaf", "1.0.0")
+			dependencyRelease(t, f.repo, "root", "1.0.0", "shared@^1", "leaf@^1")
+			m := loadManifest(t, f.path)
+			m.Skills["root"] = &manifest.Skill{Source: "demo"}
+			f.save(t, m)
+			f.restore(t)
+			m = loadManifest(t, f.path)
+			if !reflect.DeepEqual(*m.Skills["shared"].Resolved, old) {
+				t.Fatal("restore moved an existing pin")
+			}
+			assertResolved(t, m.Skills["root"], "^1.0.0", "1.0.0")
+			if m.Skills["leaf"].IsDirect() || m.Skills["leaf"].Version != "" {
+				t.Fatalf("leaf = %+v", m.Skills["leaf"])
+			}
+		})
+	}
+}
+
+func TestDependencyManifestOnlyCloneRestoresExactPins(t *testing.T) {
+	for _, global := range []bool{false, true} {
+		t.Run(fmt.Sprint(global), func(t *testing.T) {
+			f := dependencyScope(t, global)
+			dependencyRelease(t, f.repo, "leaf", "1.0.0")
+			dependencyRelease(t, f.repo, "root", "1.0.0", "leaf@^1")
+			f.add(t, "root")
+			before := readText(t, f.path)
+			dependencyRelease(t, f.repo, "leaf", "1.9.0")
+			dependencyRelease(t, f.repo, "root", "2.0.0", "missing@^2")
+			if global {
+				for _, dir := range []string{".agents", ".claude"} {
+					if err := os.RemoveAll(filepath.Join(f.root, dir)); err != nil {
+						t.Fatal(err)
+					}
+				}
+			} else {
+				f.root = testutil.NewRepo(t)
+				f.opts.Root = f.root
+				f.path = filepath.Join(f.root, manifest.FileName)
+				testutil.WriteFile(t, f.path, before)
+			}
+			cache, err := os.UserCacheDir()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.RemoveAll(filepath.Join(cache, "kitt")); err != nil {
+				t.Fatal(err)
+			}
+			f.restore(t)
+			if readText(t, f.path) != before {
+				t.Fatal("exact restore rewrote manifest")
+			}
+			for _, name := range []string{"root", "leaf"} {
+				s := loadManifest(t, f.path).Skills[name]
+				if s.Resolved.Version != "1.0.0" {
+					t.Fatalf("%s moved to %s", name, s.Resolved.Version)
+				}
+				assertLinkResolves(t, claudePath(f.root, name), skillPath(f.root, name))
+			}
+			assertNoTempDirs(t, f.root)
+		})
+	}
+}
+
+func TestDependencyCacheOnlyReinstall(t *testing.T) {
+	for _, global := range []bool{false, true} {
+		for _, modified := range []bool{false, true} {
+			t.Run(fmt.Sprintf("global=%t/modified=%t", global, modified), func(t *testing.T) {
+				f := dependencyScope(t, global)
+				dependencyRelease(t, f.repo, "leaf", "1.0.0")
+				dependencyRelease(t, f.repo, "root", "1.0.0", "leaf@^1")
+				f.add(t, "root")
+				m := readText(t, f.path)
+				if err := os.RemoveAll(f.repo); err != nil {
+					t.Fatal(err)
+				}
+				for _, name := range []string{"root", "leaf"} {
+					if modified {
+						testutil.WriteFile(t, filepath.Join(skillPath(f.root, name), "SKILL.md"), "foreign modified metadata\n")
+					} else if err := os.RemoveAll(skillPath(f.root, name)); err != nil {
+						t.Fatal(err)
+					}
+				}
+				f.restore(t)
+				if readText(t, f.path) != m {
+					t.Fatal("cache-only restore changed manifest")
+				}
+				for name, s := range loadManifest(t, f.path).Skills {
+					sum, err := skill.Hash(skillPath(f.root, name))
+					if err != nil || sum != s.Resolved.Hash {
+						t.Fatalf("%s was not restored to its pin", name)
+					}
+				}
+				assertNoTempDirs(t, f.root)
+			})
+		}
+	}
+}
+
+func TestDependencyUnchangedRestoreWithoutSourceOrCache(t *testing.T) {
+	for _, global := range []bool{false, true} {
+		t.Run(fmt.Sprint(global), func(t *testing.T) {
+			f := dependencyScope(t, global)
+			dependencyRelease(t, f.repo, "leaf", "1.0.0")
+			dependencyRelease(t, f.repo, "root", "1.0.0", "leaf@^1")
+			f.add(t, "root")
+			removeSourceAndCache(t, f.repo)
+			before := f.snapshot(t)
+			f.restore(t)
+			assertSameTree(t, before, f.snapshot(t))
+			cache, err := os.UserCacheDir()
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertMissing(t, filepath.Join(cache, "kitt"))
+			assertNoTempDirs(t, f.root)
+		})
+	}
+}
+
+func TestDependencyRestoreRejectsStaleAndIncompleteManifest(t *testing.T) {
+	for _, global := range []bool{false, true} {
+		for _, edit := range []string{"version", "missing", "requires"} {
+			t.Run(fmt.Sprintf("global=%t/%s", global, edit), func(t *testing.T) {
+				f := dependencyScope(t, global)
+				dependencyRelease(t, f.repo, "leaf", "1.0.0")
+				dependencyRelease(t, f.repo, "root", "1.0.0", "leaf@^1")
+				f.add(t, "root")
+				m := loadManifest(t, f.path)
+				want := ""
+				switch edit {
+				case "version":
+					m.Skills["root"].Version = "^2"
+					want = "skills.root.version"
+				case "missing":
+					delete(m.Skills, "leaf")
+					want = "incomplete manifest"
+				case "requires":
+					raw := []string{"demo/leaf@^2"}
+					m.Skills["root"].Resolved.Requires = &raw
+					want = "explicit install or upgrade"
+				}
+				f.save(t, m)
+				removeSourceAndCache(t, f.repo)
+				before := f.snapshot(t)
+				err := install.Restore(f.opts)
+				assertUntouchedError(t, err, want)
+				if edit == "version" && (!strings.Contains(err.Error(), "1.0.0") || !strings.Contains(err.Error(), "clear skills.root.resolved")) {
+					t.Fatalf("stale pin recovery = %v", err)
+				}
+				assertSameTree(t, before, f.snapshot(t))
+				assertNoTempDirs(t, f.root)
+			})
+		}
+	}
+}
+
+func TestDependencyOrphanRetention(t *testing.T) {
+	for _, global := range []bool{false, true} {
+		t.Run(fmt.Sprint(global), func(t *testing.T) {
+			f := dependencyScope(t, global)
+			dependencyRelease(t, f.repo, "leaf", "1.0.0")
+			dependencyRelease(t, f.repo, "root", "1.0.0", "leaf@^1")
+			f.add(t, "root@1.0.0")
+			pin := *loadManifest(t, f.path).Skills["leaf"].Resolved
+			dependencyRelease(t, f.repo, "root", "2.0.0")
+			f.add(t, "root@2.0.0")
+			f.restore(t)
+			leaf := loadManifest(t, f.path).Skills["leaf"]
+			if leaf == nil || leaf.IsDirect() || len(leaf.Via) != 0 || !reflect.DeepEqual(*leaf.Resolved, pin) {
+				t.Fatalf("orphan was removed/promoted/changed: %+v", leaf)
+			}
+			assertLinkResolves(t, claudePath(f.root, "leaf"), skillPath(f.root, "leaf"))
+		})
+	}
+}
+
+func TestDependencyPlanningFailuresLeaveManagedStateUntouched(t *testing.T) {
+	for _, global := range []bool{false, true} {
+		for _, failure := range []string{"conflict", "cycle", "foreign"} {
+			t.Run(fmt.Sprintf("global=%t/%s", global, failure), func(t *testing.T) {
+				f := dependencyScope(t, global)
+				dependencyRelease(t, f.repo, "shared", "1.0.0")
+				f.add(t, "shared@1.0.0")
+				if err := os.Remove(skillPath(f.root, ".kitt-installed")); err != nil {
+					t.Fatal(err)
+				}
+				want := ""
+				switch failure {
+				case "conflict":
+					dependencyRelease(t, f.repo, "root", "1.0.0", "shared@^2")
+					want = "incompatible requirements"
+				case "cycle":
+					dependencyRelease(t, f.repo, "child", "1.0.0", "root@^1")
+					dependencyRelease(t, f.repo, "root", "1.0.0", "child@^1")
+					want = "dependency cycle"
+				case "foreign":
+					dependencyRelease(t, f.repo, "child", "1.0.0")
+					dependencyRelease(t, f.repo, "root", "1.0.0", "child@^1")
+					testutil.WriteFile(t, filepath.Join(skillPath(f.root, "child"), "note"), "foreign\n")
+					want = "was not installed by kitt"
+				}
+				before := f.snapshot(t)
+				err := install.Add(f.opts, "root")
+				assertUntouchedError(t, err, want)
+				assertSameTree(t, before, f.snapshot(t))
+				assertMissing(t, skillPath(f.root, ".kitt-installed"))
+				assertNoTempDirs(t, f.root)
+			})
+		}
+	}
+}
+
+func TestDependencyStagingValidationLeavesManagedStateUntouched(t *testing.T) {
+	for _, global := range []bool{false, true} {
+		for _, failure := range []string{"hash", "snapshot", "link-path"} {
+			t.Run(fmt.Sprintf("global=%t/%s", global, failure), func(t *testing.T) {
+				f := dependencyScope(t, global)
+				dependencyRelease(t, f.repo, "alpha", "1.0.0")
+				dependencyRelease(t, f.repo, "zulu", "1.0.0")
+				f.add(t, "alpha")
+				f.add(t, "zulu")
+				m := loadManifest(t, f.path)
+				want := ""
+				switch failure {
+				case "hash":
+					m.Skills["zulu"].Resolved.Hash = "h1:incorrect"
+					want = "hash mismatch"
+				case "snapshot":
+					raw := []string{"demo/alpha@^1"}
+					m.Skills["zulu"].Resolved.Requires = &raw
+					want = "snapshot disagrees"
+				case "link-path":
+					if err := os.RemoveAll(filepath.Join(f.root, ".claude", "skills")); err != nil {
+						t.Fatal(err)
+					}
+					testutil.WriteFile(t, filepath.Join(f.root, ".claude", "skills"), "not a directory\n")
+					want = "not a directory"
+				}
+				f.save(t, m)
+				for _, name := range []string{"alpha", "zulu"} {
+					if err := os.RemoveAll(skillPath(f.root, name)); err != nil {
+						t.Fatal(err)
+					}
+				}
+				before := f.snapshot(t)
+				err := install.Restore(f.opts)
+				assertUntouchedError(t, err, want)
+				assertSameTree(t, before, f.snapshot(t))
+				assertNoTempDirs(t, f.root)
+			})
+		}
+	}
+}
+
+func TestDependencyLegacyManifestRemainsByteIdenticalOffline(t *testing.T) {
+	for _, global := range []bool{false, true} {
+		t.Run(fmt.Sprint(global), func(t *testing.T) {
+			f := dependencyScope(t, global)
+			testutil.Release(t, f.repo, "legacy", "1.0.0")
+			f.add(t, "legacy")
+			m := loadManifest(t, f.path)
+			m.Skills["legacy"].Resolved.Requires = nil
+			f.save(t, m)
+			text := "# Preserve comments and spacing in legacy manifests.\n\n" + readText(t, f.path)
+			testutil.WriteFile(t, f.path, text)
+			removeSourceAndCache(t, f.repo)
+			before := f.snapshot(t)
+			f.restore(t)
+			if readText(t, f.path) != text {
+				t.Fatal("unchanged legacy manifest was rewritten")
+			}
+			assertSameTree(t, before, f.snapshot(t))
+		})
+	}
+}
+
+func TestDependencyUnresolvedRestoreCannotMovePinnedDependency(t *testing.T) {
+	for _, global := range []bool{false, true} {
+		t.Run(fmt.Sprint(global), func(t *testing.T) {
+			f := dependencyScope(t, global)
+			dependencyRelease(t, f.repo, "leaf", "1.0.0")
+			dependencyRelease(t, f.repo, "root", "1.0.0", "leaf@^1")
+			f.add(t, "root")
+			dependencyRelease(t, f.repo, "leaf", "2.0.0")
+			dependencyRelease(t, f.repo, "new-root", "1.0.0", "leaf@^2")
+			m := loadManifest(t, f.path)
+			m.Skills["new-root"] = &manifest.Skill{Source: "demo"}
+			f.save(t, m)
+			before := f.snapshot(t)
+			err := install.Restore(f.opts)
+			assertUntouchedError(t, err, "explicit install or upgrade")
+			assertSameTree(t, before, f.snapshot(t))
+			assertNoTempDirs(t, f.root)
+		})
+	}
+}
+
+func TestDependencyExplicitInstallProtectsDependents(t *testing.T) {
+	for _, global := range []bool{false, true} {
+		t.Run(fmt.Sprint(global), func(t *testing.T) {
+			f := dependencyScope(t, global)
+			dependencyRelease(t, f.repo, "leaf", "1.0.0")
+			dependencyRelease(t, f.repo, "root", "1.0.0", "leaf@^1")
+			f.add(t, "root")
+			dependencyRelease(t, f.repo, "leaf", "2.0.0")
+			before := f.snapshot(t)
+			err := install.Add(f.opts, "leaf@2.0.0")
+			assertUntouchedError(t, err, "cannot install demo/leaf")
+			if !strings.Contains(err.Error(), "demo/root@1.0.0 requires ^1") {
+				t.Fatalf("missing requester: %v", err)
+			}
+			assertSameTree(t, before, f.snapshot(t))
+			assertNoTempDirs(t, f.root)
+		})
+	}
+}
