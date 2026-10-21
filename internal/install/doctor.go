@@ -41,12 +41,16 @@ func Doctor(opts Options) (int, error) {
 		}
 	}
 	d := &doctor{
-		p:       p,
-		out:     outputOf(opts.Out),
-		missing: map[string]bool{},
+		p:        p,
+		out:      outputOf(opts.Out),
+		missing:  map[string]bool{},
+		verified: map[string]bool{},
 	}
 	names := sortedNames(m.Skills)
 	if err := d.skills(m, names); err != nil {
+		return 0, err
+	}
+	if err := d.dependencies(m, names); err != nil {
 		return 0, err
 	}
 	managed := managedNames(p.global, names, agents)
@@ -72,6 +76,7 @@ type doctor struct {
 	out      io.Writer
 	problems int
 	missing  map[string]bool
+	verified map[string]bool
 }
 
 func (d *doctor) line(msg string) {
@@ -105,6 +110,7 @@ func (d *doctor) skills(m *manifest.Manifest, names []string) error {
 		if !match {
 			d.line(fmt.Sprintf("modified: %s (local changes; kitt install restores the pinned version)", name))
 		}
+		d.verified[name] = match
 	}
 	return nil
 }

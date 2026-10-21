@@ -270,6 +270,9 @@ func cycle(nodes map[string]assignment) error {
 	var stack []string
 	var visit func(string) error
 	visit = func(name string) error {
+		if _, ok := nodes[name]; !ok {
+			return nil
+		}
 		if i, ok := active[name]; ok {
 			path := make([]string, 0, len(stack)-i+1)
 			for _, step := range append(slices.Clone(stack[i:]), name) {
@@ -302,13 +305,18 @@ func cycle(nodes map[string]assignment) error {
 }
 
 func (p *planner) plan(selected map[string]Node) *Plan {
-	via := make(map[string][]string)
+	graphNodes := make([]Node, 0, len(selected))
 	for _, name := range keys(selected) {
-		for _, text := range selected[name].Requires {
-			r, _ := ParseRef(text)
-			via[r.Name] = append(via[r.Name], name)
+		n := selected[name]
+		if s := p.seeds[name]; s != nil {
+			n.Direct = s.IsDirect()
 		}
+		if _, ok := p.targets[name]; ok {
+			n.Direct = true
+		}
+		graphNodes = append(graphNodes, n)
 	}
+	graph := AnalyzeGraph(graphNodes)
 	plan := &Plan{Nodes: []Node{}, Orphans: []string{}, Diff: Diff{Added: []Node{}, Changed: []Node{}, Unchanged: []Node{}}}
 	for _, name := range keys(selected) {
 		n := selected[name]
@@ -318,7 +326,7 @@ func (p *planner) plan(selected map[string]Node) *Plan {
 		if _, ok := p.targets[name]; ok {
 			n.Direct = true
 		}
-		n.Via = slices.Compact(via[name]) // parent iteration was sorted
+		n.Via = graph.Via[name]
 		if n.Via == nil {
 			n.Via = []string{}
 		}
@@ -338,10 +346,52 @@ func (p *planner) plan(selected map[string]Node) *Plan {
 			plan.Diff.Changed = append(plan.Diff.Changed, n)
 		}
 	}
+	plan.Orphans = graph.Orphans
+	return plan
+}
+
+// GraphInfo describes a pinned graph without resolving versions or accessing sources.
+// Via and Orphans are sorted and unique. Cycle is the first deterministic cycle.
+type GraphInfo struct {
+	Via     map[string][]string
+	Orphans []string
+	Cycle   error
+}
+
+// AnalyzeGraph reuses planner traversal for diagnostics, including disconnected
+// subtrees. Missing nodes and malformed references are skipped; callers diagnose
+// those separately. Inputs are never modified.
+func AnalyzeGraph(nodes []Node) GraphInfo {
+	selected := make(map[string]assignment, len(nodes))
+	for _, n := range nodes {
+		raw := n.Requires
+		n.Requires = nil
+		for _, text := range raw {
+			if r, err := ParseRef(text); err == nil {
+				n.Requires = append(n.Requires, r.WithDefaultSource(n.Source).String())
+			}
+		}
+		slices.Sort(n.Requires)
+		n.Requires = slices.Compact(n.Requires)
+		selected[n.Name] = assignment{Node: n}
+	}
+	info := GraphInfo{Via: make(map[string][]string), Orphans: []string{}, Cycle: cycle(selected)}
+	for _, name := range keys(selected) {
+		for _, text := range selected[name].Requires {
+			r, _ := ParseRef(text)
+			info.Via[r.Name] = append(info.Via[r.Name], name)
+		}
+	}
+	for name, parents := range info.Via {
+		info.Via[name] = slices.Compact(parents)
+	}
 	reachable := make(map[string]bool)
 	var mark func(string)
 	mark = func(name string) {
 		if reachable[name] {
+			return
+		}
+		if _, ok := selected[name]; !ok {
 			return
 		}
 		reachable[name] = true
@@ -350,15 +400,17 @@ func (p *planner) plan(selected map[string]Node) *Plan {
 			mark(r.Name)
 		}
 	}
-	for _, n := range plan.Nodes {
+	for _, name := range keys(selected) {
+		n := selected[name]
 		if n.Direct {
 			mark(n.Name)
 		}
 	}
-	for _, n := range plan.Nodes {
+	for _, name := range keys(selected) {
+		n := selected[name]
 		if !reachable[n.Name] {
-			plan.Orphans = append(plan.Orphans, n.Name)
+			info.Orphans = append(info.Orphans, n.Name)
 		}
 	}
-	return plan
+	return info
 }
