@@ -22,15 +22,16 @@ import (
 // installSources separates selecting releases from reading exact commits. Exact
 // reads use the cache first, including when the original repository is gone.
 type installSources struct {
-	current  *manifest.Manifest
-	restore  bool
-	opened   map[string]*source.Source
-	paths    paths
-	targets  map[string]bool
-	legacy   map[string]bool
-	unknown  map[string]bool // legacy pins outside the request whose tree cannot be read
-	fetched  map[string]bool
-	releases map[string][]dependency.Release
+	current     *manifest.Manifest
+	restore     bool
+	opened      map[string]*source.Source
+	paths       paths
+	targets     map[string]bool
+	legacy      map[string]bool
+	unknown     map[string]bool // legacy pins outside the request whose tree cannot be read
+	unavailable map[string]bool // legacy trees that are missing or modified
+	fetched     map[string]bool
+	releases    map[string][]dependency.Release
 }
 
 // Pin constraints belong to the planner, allowing release search to backtrack
@@ -318,6 +319,7 @@ func stageAndApplyPlan(p paths, m *manifest.Manifest, plan *dependency.Plan, acc
 		}
 	}
 	committed = true
+	warnUnknownLegacyRequirements(plan, access)
 	if removeErr := removeTree(tx.root); removeErr != nil {
 		// The install is committed. A locked backup must not hide the report
 		// or fail the command; rollback is no longer possible.
@@ -371,6 +373,7 @@ func planningManifest(p paths, m *manifest.Manifest, access *installSources, tar
 	access.targets = map[string]bool{}
 	access.legacy = map[string]bool{}
 	access.unknown = map[string]bool{}
+	access.unavailable = map[string]bool{}
 	for _, target := range targets {
 		access.targets[target.Name] = true
 	}
@@ -418,6 +421,7 @@ func planningManifest(p paths, m *manifest.Manifest, access *installSources, tar
 			// requested closure reaches it, buildDependencyPlan loads the pin.
 			access.legacy[name] = true
 			access.unknown[name] = true
+			access.unavailable[name] = !matched
 			empty := []string{}
 			pin.Requires = &empty
 			continue
@@ -463,11 +467,6 @@ func buildDependencyPlan(p paths, current *manifest.Manifest, targets []dependen
 		nodes := map[string]dependency.Node{}
 		for _, n := range plan.Nodes {
 			nodes[n.Name] = n
-			if old := current.Skills[n.Name]; access.legacy[n.Name] && (old.Source != n.Source || old.Resolved.Commit != n.Commit) {
-				// The planner read the selected commit for every replaced pin.
-				delete(access.legacy, n.Name)
-				delete(access.unknown, n.Name)
-			}
 		}
 		changed := false
 		seen := map[string]bool{}
@@ -519,6 +518,12 @@ func buildDependencyPlan(p paths, current *manifest.Manifest, targets []dependen
 			}
 		}
 		if !changed {
+			for _, n := range plan.Nodes {
+				if old := access.current.Skills[n.Name]; access.legacy[n.Name] && (old.Source != n.Source || old.Resolved.Commit != n.Commit) {
+					// Only the final selection makes a replaced pin's requirements known.
+					delete(access.unknown, n.Name)
+				}
+			}
 			return plan, nil
 		}
 	}
@@ -527,23 +532,46 @@ func buildDependencyPlan(p paths, current *manifest.Manifest, targets []dependen
 // A moved pin already has authoritative requirements from its selected commit.
 // An unchanged legacy pin needs its old commit only when this request reaches it.
 func loadLegacyRequirements(p paths, current *manifest.Manifest, n dependency.Node, access *installSources) (bool, error) {
-	if !access.legacy[n.Name] {
+	if !access.legacy[n.Name] || !access.unknown[n.Name] {
+		return false, nil
+	}
+	old := access.current.Skills[n.Name]
+	if old.Resolved.Requires != nil || old.Source != n.Source || old.Resolved.Commit != n.Commit {
 		return false, nil
 	}
 	s := current.Skills[n.Name]
-	if s.Source != n.Source || s.Resolved.Commit != n.Commit {
-		delete(access.legacy, n.Name)
-		delete(access.unknown, n.Name)
-		return false, nil
-	}
 	raw, err := pinnedRequirements(p, s, n.Name, access)
 	if err != nil {
 		return false, err
 	}
 	s.Resolved.Requires = &raw
-	delete(access.legacy, n.Name)
 	delete(access.unknown, n.Name)
 	return true, nil
+}
+
+func warnUnknownLegacyRequirements(plan *dependency.Plan, access *installSources) {
+	var unknown []string
+	for _, name := range slices.Sorted(maps.Keys(access.unknown)) {
+		if access.unavailable[name] {
+			unknown = append(unknown, name)
+		}
+	}
+	if len(unknown) == 0 {
+		return
+	}
+	moved, dependencies := false, false
+	for _, s := range access.current.Skills {
+		dependencies = dependencies || !s.IsDirect() || len(s.Via) > 0 || s.Resolved != nil && s.Resolved.Requires != nil && len(*s.Resolved.Requires) > 0
+	}
+	for _, n := range plan.Nodes {
+		dependencies = dependencies || !n.Direct || len(n.Via) > 0 || len(n.Requires) > 0
+		if old := access.current.Skills[n.Name]; old != nil && old.Resolved != nil && old.Resolved.Commit != n.Commit {
+			moved = true
+		}
+	}
+	if moved && dependencies {
+		fmt.Fprintf(os.Stderr, "warning: requirements of %s are unknown (not installed); run kitt install to restore them, then kitt doctor to verify\n", strings.Join(unknown, ", "))
+	}
 }
 
 // installedRequirements reads requirements from a hash-verified skill directory.

@@ -339,8 +339,12 @@ func TestDoctorInvalidPinnedFrontmatterIsFinding(t *testing.T) {
 }
 
 func TestDoctorForeignRequiresMatchesDependencyFree(t *testing.T) {
-	for _, requires := range []string{`"python3"`, `["numpy"]`} {
-		t.Run(requires, func(t *testing.T) {
+	for _, tc := range []struct{ name, requires string }{
+		{"scalar", `"python3"`},
+		{"foreign_list", `["numpy"]`},
+	} {
+		requires := tc.requires
+		t.Run(tc.name, func(t *testing.T) {
 			project := healthyProject(t)
 			path := filepath.Join(project, manifest.FileName)
 			m := loadManifest(t, path)
@@ -393,9 +397,15 @@ func TestDoctorLegacyFrontmatterDoesNotGovernVia(t *testing.T) {
 }
 
 func TestDoctorForeignRequiresWithDependenciesInPlay(t *testing.T) {
-	for _, requires := range []string{`"python3"`, `["numpy"]`, `{runtime: python3}`, `[123]`} {
+	for _, tc := range []struct{ name, requires string }{
+		{"scalar", `"python3"`},
+		{"foreign_list", `["numpy"]`},
+		{"mapping", `{runtime: python3}`},
+		{"non_string_list", `[123]`},
+	} {
+		requires := tc.requires
 		for _, snapshot := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/snapshot=%t", requires, snapshot), func(t *testing.T) {
+			t.Run(fmt.Sprintf("%s/snapshot=%t", tc.name, snapshot), func(t *testing.T) {
 				f := diagnosticFixture(t, false)
 				dependencyRelease(t, f.repo, "b", "1.0.0")
 				f.add(t, "b")

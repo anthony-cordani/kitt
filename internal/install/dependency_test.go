@@ -705,8 +705,9 @@ func TestCorrectManagedLinkIsNotRecreated(t *testing.T) {
 
 func TestInstallRepairsRequestedSkillWhenTreeIsMissingOrModified(t *testing.T) {
 	for _, missing := range []bool{false, true} {
-		for _, ref := range []string{"foo", "foo@^2"} {
-			t.Run(fmt.Sprintf("missing=%t/%s", missing, ref), func(t *testing.T) {
+		for _, tc := range []struct{ name, ref string }{{"unchanged", "foo"}, {"caret", "foo@^2"}} {
+			ref := tc.ref
+			t.Run(fmt.Sprintf("missing=%t/%s", missing, tc.name), func(t *testing.T) {
 				f := dependencyScope(t, false)
 				dependencyRelease(t, f.repo, "foo", "2.0.0")
 				dependencyRelease(t, f.repo, "notes", "1.0.0")
