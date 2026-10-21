@@ -125,3 +125,32 @@ func TestListMissingDependencyKeepsSelectedVersionAndAvailableTolerance(t *testi
 		t.Fatalf("list missing pin/source:\n%s", out)
 	}
 }
+
+func TestListAndDoctorLegacyUnavailableDependenciesAgree(t *testing.T) {
+	for _, state := range []string{"missing", "modified"} {
+		t.Run(state, func(t *testing.T) {
+			f := diagnosticFixture(t, false)
+			m := loadManifest(t, f.path)
+			m.Skills["root"].Resolved.Requires = nil
+			f.save(t, m)
+			if state == "missing" {
+				if err := os.RemoveAll(skillPath(f.root, "root")); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				testutil.WriteFile(t, filepath.Join(skillPath(f.root, "root"), "SKILL.md"), "modified metadata\n")
+			}
+			list := installedTree(t, f)
+			_, doctor := fixtureDoctor(t, f)
+			if !strings.Contains(list, "Dependency information incomplete") || !strings.Contains(doctor, "dependency validation incomplete: root") {
+				t.Fatalf("commands must report incomplete information:\nlist:\n%s\ndoctor:\n%s", list, doctor)
+			}
+			if strings.Contains(list, "Orphaned transitive skills") || strings.Contains(doctor, "orphaned dependency") {
+				t.Fatalf("commands claimed an orphan without evidence:\nlist:\n%s\ndoctor:\n%s", list, doctor)
+			}
+			if !strings.Contains(list, "demo/leaf@1.0.0") {
+				t.Fatalf("list omitted the child with unknown reachability:\n%s", list)
+			}
+		})
+	}
+}

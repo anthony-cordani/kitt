@@ -101,15 +101,21 @@ func (d *doctor) dependencies(m *manifest.Manifest, names []string) error {
 		d.line(graph.Cycle.Error())
 	}
 	for _, name := range names {
-		var comparable []string
+		var comparable, expected []string
 		for _, parent := range m.Skills[name].Via {
-			// Unknown legacy metadata cannot disprove an existing reverse edge.
-			if m.Skills[parent] == nil || known[parent] {
+			// Only saved snapshots govern via. Verified legacy frontmatter can
+			// check dependencies, but an unchanged restore does not save via.
+			if s := m.Skills[parent]; s == nil || s.Resolved != nil && s.Resolved.Requires != nil {
 				comparable = append(comparable, parent)
 			}
 		}
-		if !slices.Equal(comparable, graph.Via[name]) {
-			d.line(fmt.Sprintf("stale via: %s (got %v; want %v; run kitt install)", name, m.Skills[name].Via, graph.Via[name]))
+		for _, parent := range graph.Via[name] {
+			if s := m.Skills[parent]; s.Resolved != nil && s.Resolved.Requires != nil {
+				expected = append(expected, parent)
+			}
+		}
+		if !slices.Equal(comparable, expected) {
+			d.line(fmt.Sprintf("stale via: %s (got %v; want %v; run kitt install)", name, m.Skills[name].Via, expected))
 		}
 	}
 	// An unavailable reachable legacy node could lead to any otherwise detached

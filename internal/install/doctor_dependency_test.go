@@ -308,3 +308,31 @@ func TestDoctorInvalidPinnedFrontmatterIsFinding(t *testing.T) {
 		t.Fatalf("invalid pinned metadata: %d\n%s", n, out)
 	}
 }
+
+func TestDoctorLegacyFrontmatterDoesNotGovernVia(t *testing.T) {
+	for _, stale := range []bool{false, true} {
+		t.Run(fmt.Sprint(stale), func(t *testing.T) {
+			f := diagnosticFixture(t, false)
+			f.add(t, "leaf") // Keep the child reachable even in the stale-edge case.
+			m := loadManifest(t, f.path)
+			m.Skills["root"].Resolved.Requires = nil
+			if stale {
+				testutil.WriteFile(t, filepath.Join(skillPath(f.root, "root"), "SKILL.md"),
+					"---\nname: root\ndescription: Legacy root.\nmetadata:\n  version: 1.0.0\n---\n")
+				hash, err := skill.Hash(skillPath(f.root, "root"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				m.Skills["root"].Resolved.Hash = hash
+			} else {
+				m.Skills["leaf"].Via = nil
+			}
+			f.save(t, m)
+			before := f.snapshot(t)
+			if n, out := fixtureDoctor(t, f); n != 0 || out != "ok\n" {
+				t.Fatalf("legacy metadata generated a via finding: %d\n%s", n, out)
+			}
+			assertSameTree(t, before, f.snapshot(t))
+		})
+	}
+}

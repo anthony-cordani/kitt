@@ -17,10 +17,14 @@ func releaseRemoteURL(root, remote string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return repositoryURL(root, url), nil
+}
+
+func repositoryURL(root, url string) string {
 	if !filepath.IsAbs(url) && !strings.Contains(url, ":") {
-		url = filepath.Join(root, url)
+		return filepath.Join(root, url)
 	}
-	return url, nil
+	return url
 }
 
 // runGit runs `git -C root` with args.

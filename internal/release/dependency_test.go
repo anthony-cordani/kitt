@@ -202,3 +202,85 @@ func requireReleaseFailureWithoutTags(t *testing.T, repo, remote, want string) e
 	requireRemoteTags(t, repo, remote, remoteBefore)
 	return err
 }
+
+func TestReleaseRequirementSetFailuresLeaveTagsUnchanged(t *testing.T) {
+	for _, tc := range []struct {
+		name, version, want string
+		refs                []string
+		reason              dependency.ConflictReason
+	}{
+		{name: "disjoint ranges", version: "1.1.0", refs: []string{"helper@^1", "helper@^2"}, want: "incompatible requirements for origin/helper", reason: dependency.EmptyIntersection},
+		{name: "source collision", version: "1.1.0", refs: []string{"helper@^1", "team/helper@^1"}, want: `conflicting sources: "origin/helper", "team/helper"`, reason: dependency.SourceCollision},
+		{name: "self requirement", version: "1.1.0", refs: []string{"review@^1"}, want: "dependency cycle: origin/review@1.1.0 -> origin/review@1.1.0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testutil.IsolateHome(t)
+			repo, _ := newPushedSkillRepo(t, "origin", "1.0.0")
+			testutil.Git(t, repo, "tag", "review/v1.0.0")
+			testutil.Git(t, repo, "push", "origin", "refs/tags/review/v1.0.0")
+			testutil.Release(t, repo, "helper", "1.2.3")
+			testutil.Release(t, repo, "helper", "2.0.0")
+			testutil.Git(t, repo, "push", "origin", "refs/tags/helper/v1.2.3", "refs/tags/helper/v2.0.0")
+			other := testutil.NewRepo(t)
+			testutil.Release(t, other, "helper", "1.2.3")
+			writeReleaseSources(t, repo, map[string]string{"team": testutil.URL(other)})
+			testutil.WriteSkillRequires(t, repo, "review", tc.version, tc.refs)
+			testutil.Commit(t, repo, "declare conflicting requirements")
+			testutil.Git(t, repo, "push", "origin", "main")
+			err := requireReleaseFailureWithoutTags(t, repo, "origin", tc.want)
+			if tc.reason != "" {
+				var conflict *dependency.ConflictError
+				if !errors.As(err, &conflict) || conflict.Reason != tc.reason || len(conflict.Requests) != 2 {
+					t.Fatalf("missing planner conflict and both requesters: %v", err)
+				}
+			} else {
+				var cycle *dependency.CycleError
+				if !errors.As(err, &cycle) {
+					t.Fatalf("missing planner cycle: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestReleaseSkillPresenceOnlyOnMatchingReleases(t *testing.T) {
+	for _, absentVersion := range []string{"0.1.0", "1.3.0"} {
+		t.Run(absentVersion, func(t *testing.T) {
+			testutil.IsolateHome(t)
+			repo, bare := newPushedSkillRepo(t, "origin", "1.0.0")
+			// The advertised tag predates the helper's directory. Even a
+			// matching bad tag must not hide a valid matching release.
+			testutil.Git(t, repo, "tag", "helper/v"+absentVersion)
+			testutil.Git(t, repo, "push", "origin", "refs/tags/helper/v"+absentVersion)
+			testutil.Release(t, repo, "helper", "1.2.3")
+			testutil.Git(t, repo, "push", "origin", "refs/tags/helper/v1.2.3")
+			pushRequirements(t, repo, "origin", []string{"helper@^1", "helper@^1.2"})
+			if err := Release(originOpts(repo, io.Discard), "review"); err != nil {
+				t.Fatal(err)
+			}
+			if tags := testutil.Git(t, bare, "tag", "--list", "review/v1.0.0"); tags != "review/v1.0.0" {
+				t.Fatalf("release tag missing: %q", tags)
+			}
+		})
+	}
+}
+
+func TestReleaseRelativeSourceAliasFromSubdirectory(t *testing.T) {
+	testutil.IsolateHome(t)
+	repo, bare := newPushedSkillRepo(t, "origin", "1.0.0")
+	other := testutil.NewRepo(t)
+	testutil.Release(t, other, "helper", "1.2.3")
+	relative, err := filepath.Rel(repo, other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeReleaseSources(t, repo, map[string]string{"team": relative})
+	pushRequirements(t, repo, "origin", []string{"team/helper@^1"})
+	t.Chdir(filepath.Join(repo, "skills", "review"))
+	if err := Release(originOpts(".", io.Discard), "review"); err != nil {
+		t.Fatal(err)
+	}
+	if tags := testutil.Git(t, bare, "tag", "--list", "review/v1.0.0"); tags != "review/v1.0.0" {
+		t.Fatalf("release tag missing: %q", tags)
+	}
+}

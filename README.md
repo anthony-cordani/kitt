@@ -111,7 +111,7 @@ hash = "h1:Lr…"
 requires = []
 ```
 
-**Manifests using `direct`, `via` or `resolved.requires` require kitt >= 0.2.0.** Older kitt rejects these as unknown keys; update teammates, CI and hook installations before sharing the manifest.
+**Manifests using `direct`, `via` or `resolved.requires` require kitt >= 0.2.0.** Older kitt rejects these as unknown keys; update teammates, CI and hook installations before sharing the manifest. Publishing a skill with `metadata.requires` also requires consumers on kitt >= 0.2.0, because older kitt cannot read that frontmatter.
 
 ## `kitt.toml`
 

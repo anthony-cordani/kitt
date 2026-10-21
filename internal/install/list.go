@@ -67,6 +67,7 @@ func writeDependencyTree(out io.Writer, skillsDir string, m *manifest.Manifest, 
 	var nodes []dependency.Node
 	children := make(map[string][]dependency.Ref)
 	labels := make(map[string]string)
+	known := make(map[string]bool)
 	for _, name := range names {
 		s := m.Skills[name]
 		if s == nil {
@@ -85,6 +86,7 @@ func writeDependencyTree(out io.Writer, skillsDir string, m *manifest.Manifest, 
 			}
 			if s.Resolved.Requires != nil {
 				n.Requires = *s.Resolved.Requires
+				known[name] = true
 			} else {
 				match, err := hashMatches(filepath.Join(skillsDir, name), s.Resolved.Hash)
 				if err != nil {
@@ -94,11 +96,16 @@ func writeDependencyTree(out io.Writer, skillsDir string, m *manifest.Manifest, 
 					meta, err := skill.ParseFile(filepath.Join(skillsDir, name, "SKILL.md"))
 					if err == nil {
 						n.Requires = meta.Requires
+						known[name] = true
 					}
 				}
 			}
 		}
-		n.Requires, _ = diagnosticRequirements(s.Source, n.Requires)
+		var problems []error
+		n.Requires, problems = diagnosticRequirements(s.Source, n.Requires)
+		if len(problems) > 0 && s.Resolved != nil && s.Resolved.Requires == nil {
+			known[name] = false
+		}
 		for _, text := range n.Requires {
 			r, _ := dependency.ParseRef(text)
 			children[name] = append(children[name], r)
@@ -148,8 +155,19 @@ func writeDependencyTree(out io.Writer, skillsDir string, m *manifest.Manifest, 
 			write(name, "  ", "", "")
 		}
 	}
-	if len(graph.Orphans) > 0 {
+	incomplete := false
+	for _, name := range names {
+		if !known[name] && !slices.Contains(graph.Orphans, name) {
+			incomplete = true
+			break
+		}
+	}
+	if incomplete {
+		fmt.Fprintln(out, "Dependency information incomplete; transitive reachability is unknown:")
+	} else if len(graph.Orphans) > 0 {
 		fmt.Fprintln(out, "Orphaned transitive skills:")
+	}
+	if len(graph.Orphans) > 0 {
 		// Start detached subtrees at their roots, even when a child sorts first.
 		for _, name := range graph.Orphans {
 			if len(graph.Via[name]) == 0 {

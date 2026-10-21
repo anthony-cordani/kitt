@@ -128,8 +128,13 @@ func (e *requirementError) Unwrap() error { return e.error }
 func validateRequirements(root, remote string, meta skill.Meta) error {
 	path := filepath.Join(root, manifest.FileName)
 	scope := dependency.Scope{Command: "release", ManifestPath: path}
-	var sameSource, qualified *dependency.GitSources
-	var aliases map[string]string
+	if len(meta.Requires) == 0 {
+		return nil
+	}
+	aliases := map[string]string{remote: ""}
+	var configured map[string]string
+	var requirements []string
+	access := &releaseSources{root: root, urls: make(map[string]string), opened: make(map[string]*source.Source), versions: make(map[string]string)}
 	for i, text := range meta.Requires {
 		ref, err := dependency.ParseRef(text)
 		if err != nil {
@@ -141,53 +146,49 @@ func validateRequirements(root, remote string, meta skill.Meta) error {
 		bare := ref.Source == ""
 		ref = ref.WithDefaultSource(remote)
 		request := dependency.Requirement{Ref: ref, Requester: meta.Name, Source: remote, Version: meta.Version, Index: i}
-		access := sameSource
+		url := ""
 		if bare {
-			if sameSource == nil {
-				url, err := releaseRemoteURL(root, remote)
-				if err != nil {
-					return fmt.Errorf("%s/%s@%s requires %q: %w", remote, meta.Name, meta.Version, text, err)
-				}
-				sameSource = dependency.NewGitSources(map[string]string{remote: url})
+			url, err = releaseRemoteURL(root, remote)
+			if err != nil {
+				return fmt.Errorf("%s/%s@%s requires %q: %w", remote, meta.Name, meta.Version, text, err)
 			}
-			access = sameSource
 		} else {
-			if qualified == nil {
+			if configured == nil {
 				m, err := manifest.Load(path)
 				if err != nil && !errors.Is(err, fs.ErrNotExist) {
 					return fmt.Errorf("%s/%s@%s requires %q in project scope: %w", remote, meta.Name, meta.Version, text, err)
 				}
-				aliases = map[string]string{}
+				configured = map[string]string{}
 				if m != nil {
-					aliases = m.Sources
+					configured = m.Sources
 				}
-				qualified = dependency.NewGitSources(aliases)
 			}
-			if _, ok := aliases[ref.Source]; !ok {
+			var ok bool
+			url, ok = configured[ref.Source]
+			if !ok {
 				return &dependency.UnknownSourceError{Scope: scope, Alias: ref.Source, Requirement: request}
 			}
-			access = qualified
+			url = repositoryURL(root, url)
 		}
-		releases, err := access.Releases(ref.Source, ref.Name)
-		if err != nil {
-			return fmt.Errorf("%s/%s@%s requires %q in project scope: %w", remote, meta.Name, meta.Version, ref.String(), &dependency.AccessError{Source: ref.Source, Name: ref.Name, Operation: "list published releases", Err: err})
-		}
-		if len(releases) == 0 {
-			return &dependency.NoReleasesError{Scope: scope, Source: ref.Source, Name: ref.Name, Requests: []dependency.Requirement{request}}
-		}
-		matched := false
-		for _, release := range releases {
-			ok, err := source.Satisfies(ref.Constraint, release.Version)
-			if err != nil {
-				return err
-			}
-			matched = matched || ok
-		}
-		if !matched {
-			return &dependency.ConflictError{Scope: scope, Name: ref.Name, Sources: []string{ref.Source}, Requests: []dependency.Requirement{request}, Reason: dependency.NoMatchingRelease}
-		}
+		aliases[ref.Source] = url
+		// A qualified alias may share the remote's name. Keep the access URL
+		// per skill so bare references still use the selected remote.
+		access.urls[ref.Source+"/"+ref.Name] = url
+		requirements = append(requirements, ref.String())
 	}
-	return nil
+	commit, err := gitTrim(root, "rev-parse", "HEAD")
+	if err != nil {
+		return err
+	}
+	current := &manifest.Manifest{Sources: aliases, Skills: map[string]*manifest.Skill{
+		meta.Name: {Source: remote, Resolved: &manifest.Resolved{Version: meta.Version, Commit: commit, Requires: &requirements}},
+	}}
+	_, err = dependency.BuildPlan(scope, current, nil, access)
+	var sourceErr *dependency.AccessError
+	if errors.As(err, &sourceErr) {
+		return fmt.Errorf("%s/%s@%s requirements in project scope: %w", remote, meta.Name, meta.Version, err)
+	}
+	return err
 }
 
 func repoRoot(dir string) (string, error) {
