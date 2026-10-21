@@ -19,6 +19,8 @@ type Meta struct {
 	Description string
 	Version     string   // metadata.version, "" when absent
 	Requires    []string // metadata.requires, nil when absent
+
+	requiresLine int // String form's location, including the opening delimiter.
 }
 
 // ParseFile reads a SKILL.md file and returns its frontmatter.
@@ -51,7 +53,23 @@ func ParseFile(path string) (Meta, error) {
 	if err != nil {
 		return Meta{}, &RequiresDecodeError{Err: err}
 	}
+	node := doc.Metadata["requires"]
+	if node.Kind == yaml.AliasNode {
+		node = *node.Alias
+	}
+	if node.Kind == yaml.ScalarNode && node.Tag == "!!str" {
+		meta.requiresLine = node.Line + 1
+	}
 	return meta, nil
+}
+
+// RequirementLocation identifies an entry for reference validation diagnostics.
+// Sequence entries retain their existing zero-based index notation.
+func (m Meta) RequirementLocation(i int) string {
+	if m.requiresLine != 0 {
+		return fmt.Sprintf("metadata.requires entry %d %q at line %d", i+1, m.Requires[i], m.requiresLine)
+	}
+	return fmt.Sprintf("metadata.requires[%d]", i)
 }
 
 // RequiresDecodeError identifies errors decoding metadata.requires, so callers
@@ -69,8 +87,11 @@ func parseRequirements(path string, node yaml.Node) ([]string, error) {
 	if node.Kind == yaml.AliasNode {
 		node = *node.Alias
 	}
+	if node.Kind == yaml.ScalarNode && node.Tag == "!!str" {
+		return append([]string{}, strings.Fields(node.Value)...), nil
+	}
 	if node.Kind != yaml.SequenceNode {
-		return nil, fmt.Errorf("parse skill frontmatter %q: metadata.requires at line %d: must be a sequence of strings", path, line)
+		return nil, fmt.Errorf("parse skill frontmatter %q: metadata.requires at line %d: must be a string or sequence of strings", path, line)
 	}
 	requires := make([]string, len(node.Content))
 	for i, item := range node.Content {
@@ -87,8 +108,9 @@ func parseRequirements(path string, node yaml.Node) ([]string, error) {
 }
 
 // ForeignRequires reports whether SKILL.md metadata.requires is outside kitt's
-// format. A YAML sequence is kitt-shaped when empty or when at least one string
-// entry contains "@", even if other entries are invalid. All other values are
+// format. A string is kitt-shaped when at least one whitespace-separated token
+// contains "@". A YAML sequence is kitt-shaped when empty or when at least one
+// string entry contains "@", even if other entries are invalid. All other values are
 // foreign. Absent metadata.requires is not foreign. An unreadable file or
 // frontmatter returns an error.
 func ForeignRequires(path string) (bool, error) {
@@ -119,6 +141,14 @@ func foreignRequiresValue(node yaml.Node) bool {
 			return true
 		}
 		node = *node.Alias
+	}
+	if node.Kind == yaml.ScalarNode && node.Tag == "!!str" {
+		for _, entry := range strings.Fields(node.Value) {
+			if strings.Contains(entry, "@") {
+				return false
+			}
+		}
+		return true
 	}
 	if node.Kind != yaml.SequenceNode {
 		return true

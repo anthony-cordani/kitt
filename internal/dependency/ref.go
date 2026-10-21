@@ -119,6 +119,17 @@ func GroupRefs(refs []Ref, parentAlias string) [][]Ref {
 // inherited aliases may already have been qualified by kitt; only frontmatter
 // aliases explicitly written by authors are restricted to the alias whitelist.
 func NormalizeRequirements(raw []string, parentAlias string, snapshot bool) ([]string, error) {
+	return normalizeRequirements(raw, parentAlias, snapshot, func(i int) string {
+		return fmt.Sprintf("metadata.requires[%d]", i)
+	})
+}
+
+// NormalizeMetadataRequirements preserves frontmatter entry locations in errors.
+func NormalizeMetadataRequirements(meta skill.Meta, parentAlias string) ([]string, error) {
+	return normalizeRequirements(meta.Requires, parentAlias, false, meta.RequirementLocation)
+}
+
+func normalizeRequirements(raw []string, parentAlias string, snapshot bool, location func(int) string) ([]string, error) {
 	out := make([]string, 0, len(raw))
 	for i, text := range raw {
 		if snapshot && strings.HasPrefix(text, parentAlias+"/") {
@@ -126,7 +137,7 @@ func NormalizeRequirements(raw []string, parentAlias string, snapshot bool) ([]s
 		}
 		ref, err := ParseRef(text)
 		if err != nil {
-			return nil, &ValidationError{Location: fmt.Sprintf("metadata.requires[%d]", i), Err: err}
+			return nil, &ValidationError{Location: location(i), Err: err}
 		}
 		out = append(out, ref.WithDefaultSource(parentAlias).String())
 	}

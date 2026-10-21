@@ -262,7 +262,15 @@ func (p *planner) prepare(targets []Target) error {
 
 // normalize uses Unit 1 parsing/grouping, preserving original indexes in errors.
 func (p *planner) normalize(n Node, raw []string, snapshot bool) ([]string, error) {
-	out, err := NormalizeRequirements(raw, n.Source, snapshot)
+	location := func(i int) string { return fmt.Sprintf("metadata.requires[%d]", i) }
+	// Source adapters may retain YAML locations; validation and search policy
+	// remain the same for adapters that only supply requirement text.
+	if locations, ok := p.access.(interface {
+		RequirementLocation(alias, name, commit string, i int) string
+	}); ok && !snapshot {
+		location = func(i int) string { return locations.RequirementLocation(n.Source, n.Name, n.Commit, i) }
+	}
+	out, err := normalizeRequirements(raw, n.Source, snapshot, location)
 	if err != nil {
 		return nil, &ValidationError{Location: nodeRef(n), Err: err}
 	}

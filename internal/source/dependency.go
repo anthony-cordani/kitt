@@ -56,18 +56,20 @@ func ReadSkillMetadata(dir, name string) (skill.Meta, error) {
 
 // Requires reads validated metadata from the supplied commit, never HEAD.
 func (s *Source) Requires(name, commit string) ([]string, error) {
+	meta, err := s.SkillMetadata(name, commit)
+	return meta.Requires, err
+}
+
+// SkillMetadata reads frontmatter from an exact commit, preserving its locations.
+func (s *Source) SkillMetadata(name, commit string) (skill.Meta, error) {
 	root, err := os.MkdirTemp("", "kitt-requires-*")
 	if err != nil {
-		return nil, fmt.Errorf("stage pinned metadata: %w", err)
+		return skill.Meta{}, fmt.Errorf("stage pinned metadata: %w", err)
 	}
 	defer os.RemoveAll(root)
 	dest := filepath.Join(root, name)
 	if err := s.Extract(name, commit, dest); err != nil {
-		return nil, err
+		return skill.Meta{}, err
 	}
-	meta, err := ReadSkillMetadata(dest, name)
-	if err != nil {
-		return nil, err
-	}
-	return meta.Requires, nil
+	return ReadSkillMetadata(dest, name)
 }

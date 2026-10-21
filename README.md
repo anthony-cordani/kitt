@@ -84,11 +84,10 @@ Declare requirements in `SKILL.md` frontmatter:
 ```yaml
 metadata:
   version: "2.0.0"
-  requires:
-    - "code-review@^1.0.0"
-    - "public/security@^1"
-    - "adr@1.2.3"
+  requires: "code-review@^1.0.0 public/security@^1 adr@1.2.3"
 ```
+
+Use a space-separated string: kitt < 0.2.0 reads metadata values as strings and fails on a YAML list, so a list in a published skill breaks consumers still on 0.1.x. kitt >= 0.2.0 also accepts a list.
 
 Use `name@constraint` for the same source or `alias/name@constraint` for another source configured in `[sources]`. A constraint is mandatory: only exact `X.Y.Z` and caret `^X[.Y[.Z]]` are accepted. Caret means the same major at or above the floor, including major zero: `^0.2` accepts later `0.x` releases. Dependencies must have published releases; a branch-tip pin cannot satisfy a requirement.
 
@@ -111,7 +110,7 @@ hash = "h1:Lr…"
 requires = []
 ```
 
-**Projects and skills using dependencies need kitt >= 0.2.0.** Projects without dependencies keep the existing manifest format. Older kitt rejects `direct`, `via` and `resolved.requires` as unknown keys and cannot read `metadata.requires`; update teammates, CI and hook installations before sharing dependencies.
+**Projects and skills using dependencies need kitt >= 0.2.0.** Projects without dependencies keep the existing manifest format. Older kitt rejects `direct`, `via` and `resolved.requires` as unknown keys and does not resolve `metadata.requires`; update teammates, CI and hook installations before sharing dependencies.
 
 ## `kitt.toml`
 

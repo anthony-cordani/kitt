@@ -341,6 +341,7 @@ func TestDoctorInvalidPinnedFrontmatterIsFinding(t *testing.T) {
 func TestDoctorForeignRequiresMatchesDependencyFree(t *testing.T) {
 	for _, tc := range []struct{ name, requires string }{
 		{"scalar", `"python3"`},
+		{"foreign_words", `"numpy pandas"`},
 		{"foreign_list", `["numpy"]`},
 	} {
 		requires := tc.requires
@@ -399,6 +400,7 @@ func TestDoctorLegacyFrontmatterDoesNotGovernVia(t *testing.T) {
 func TestDoctorForeignRequiresWithDependenciesInPlay(t *testing.T) {
 	for _, tc := range []struct{ name, requires string }{
 		{"scalar", `"python3"`},
+		{"foreign_words", `"numpy pandas"`},
 		{"foreign_list", `["numpy"]`},
 		{"mapping", `{runtime: python3}`},
 		{"non_string_list", `[123]`},

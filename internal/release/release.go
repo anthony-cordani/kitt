@@ -144,7 +144,7 @@ func validateRequirements(root, remote string, meta skill.Meta) error {
 		}
 		if err != nil {
 			return &dependency.ValidationError{
-				Location: fmt.Sprintf("%s/%s@%s metadata.requires[%d] in %s (project scope)", remote, meta.Name, meta.Version, i, filepath.Join(root, "skills", meta.Name, "SKILL.md")),
+				Location: fmt.Sprintf("%s/%s@%s %s in %s (project scope)", remote, meta.Name, meta.Version, meta.RequirementLocation(i), filepath.Join(root, "skills", meta.Name, "SKILL.md")),
 				Err:      err,
 			}
 		}

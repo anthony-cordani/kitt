@@ -47,6 +47,7 @@ func legacyRequirementsFixture(t *testing.T, requires string) (paths, Options) {
 func TestLegacyNonKittRequirementsAreUnknownOutsideClosure(t *testing.T) {
 	for _, tc := range []struct{ name, requires string }{
 		{"scalar", `"python3"`},
+		{"foreign_words", `"numpy pandas"`},
 		{"foreign_list", `["numpy"]`},
 	} {
 		requires := tc.requires
@@ -89,6 +90,7 @@ func TestLegacyNonKittRequirementsAreUnknownOutsideClosure(t *testing.T) {
 func TestLegacyNonKittRequirementsFailWhenResolved(t *testing.T) {
 	for _, tc := range []struct{ name, requires string }{
 		{"scalar", `"python3"`},
+		{"foreign_words", `"numpy pandas"`},
 		{"foreign_list", `["numpy"]`},
 	} {
 		requires := tc.requires
@@ -110,32 +112,37 @@ func TestLegacyNonKittRequirementsFailWhenResolved(t *testing.T) {
 }
 
 func TestKittShapedRequiresFailRestoreUpgradeAndInstall(t *testing.T) {
-	for _, mode := range []string{"restore", "upgrade", "install"} {
-		t.Run(mode, func(t *testing.T) {
-			p, opts := legacyRequirementsFixture(t, `["db@@1.0"]`)
-			before := transactionSnapshot(t, p)
-			stderr := captureStderr(t)
-			var err error
-			switch mode {
-			case "restore":
-				err = Restore(opts)
-			case "upgrade":
-				err = Upgrade(opts, "", false)
-			default:
-				err = Add(opts, "other")
-			}
-			warning := stderr()
-			var pe *dependency.PlanError
-			if err == nil || !errors.As(err, &pe) || !pe.ManagedStateUntouched || !strings.Contains(err.Error(), "db@@1.0") {
-				t.Fatalf("%s = %v", mode, err)
-			}
-			if strings.Contains(warning, "warning:") {
-				t.Fatalf("kitt-shaped requirements warned instead of failing: %s", warning)
-			}
-			if after := transactionSnapshot(t, p); !reflect.DeepEqual(before, after) {
-				t.Fatal("invalid requirements changed managed state")
-			}
-		})
+	for _, tc := range []struct{ name, requires, want string }{
+		{"sequence", `["db@@1.0"]`, "db@@1.0"},
+		{"string", `"code-review@^1 db@@1"`, `metadata.requires entry 2 "db@@1" at line 4`},
+	} {
+		for _, mode := range []string{"restore", "upgrade", "install"} {
+			t.Run(tc.name+"/"+mode, func(t *testing.T) {
+				p, opts := legacyRequirementsFixture(t, tc.requires)
+				before := transactionSnapshot(t, p)
+				stderr := captureStderr(t)
+				var err error
+				switch mode {
+				case "restore":
+					err = Restore(opts)
+				case "upgrade":
+					err = Upgrade(opts, "", false)
+				default:
+					err = Add(opts, "other")
+				}
+				warning := stderr()
+				var pe *dependency.PlanError
+				if err == nil || !errors.As(err, &pe) || !pe.ManagedStateUntouched || !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("%s = %v; want %q", mode, err, tc.want)
+				}
+				if strings.Contains(warning, "warning:") {
+					t.Fatalf("kitt-shaped requirements warned instead of failing: %s", warning)
+				}
+				if after := transactionSnapshot(t, p); !reflect.DeepEqual(before, after) {
+					t.Fatal("invalid requirements changed managed state")
+				}
+			})
+		}
 	}
 }
 
@@ -144,6 +151,7 @@ func TestInvalidRequiresAndVersionKeepFrontmatterErrors(t *testing.T) {
 		{"empty_list", `[]`},
 		{"mixed_non_string", `["leaf@^1", 123]`},
 		{"scalar", `"python3"`},
+		{"foreign_words", `"numpy pandas"`},
 		{"foreign_list", `["numpy"]`},
 		{"mapping", `{runtime: python3}`},
 	} {

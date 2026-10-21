@@ -95,7 +95,7 @@ func stagePlan(p paths, m *manifest.Manifest, plan *dependency.Plan, access *ins
 		if err != nil {
 			return nil, cleanup, fmt.Errorf("skill %s: %w", n.Name, err)
 		}
-		raw, err := dependency.NormalizeRequirements(meta.Requires, n.Source, false)
+		raw, err := dependency.NormalizeMetadataRequirements(meta, n.Source)
 		if err != nil {
 			return nil, cleanup, fmt.Errorf("skill %s: %w", n.Name, err)
 		}

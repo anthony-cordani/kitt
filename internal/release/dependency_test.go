@@ -358,3 +358,38 @@ func TestReleaseRelativeSourceAliasFromSubdirectory(t *testing.T) {
 		t.Fatalf("release tag missing: %q", tags)
 	}
 }
+
+func TestReleaseStringRequirementsRequirePublishedDependency(t *testing.T) {
+	testutil.IsolateHome(t)
+	repo, bare := newPushedSkillRepo(t, "origin", "1.0.0")
+	testutil.WriteSkillRequires(t, repo, "helper", "1.2.3", nil)
+	testutil.WriteFile(t, filepath.Join(repo, "skills", "review", "SKILL.md"),
+		"---\nname: review\ndescription: Review code.\nmetadata:\n  version: \"1.0.0\"\n  requires: \"helper@^1.0.0\"\n---\n")
+	testutil.Commit(t, repo, "declare string requirements")
+	testutil.Git(t, repo, "push", "origin", "main")
+	requireReleaseFailureWithoutTags(t, repo, "origin", "helper has no published releases")
+	testutil.Git(t, repo, "tag", "helper/v1.2.3")
+	// A local tag still does not satisfy a requirement.
+	requireReleaseFailureWithoutTags(t, repo, "origin", "helper has no published releases")
+	testutil.Git(t, repo, "push", "origin", "refs/tags/helper/v1.2.3")
+	if err := Release(originOpts(repo, io.Discard), "review"); err != nil {
+		t.Fatal(err)
+	}
+	if tags := testutil.Git(t, bare, "tag", "--list", "review/v1.0.0"); tags != "review/v1.0.0" {
+		t.Fatalf("release tag missing: %q", tags)
+	}
+}
+
+func TestReleaseInvalidStringRequirementLocation(t *testing.T) {
+	testutil.IsolateHome(t)
+	repo, _ := newPushedSkillRepo(t, "origin", "1.0.0")
+	testutil.WriteFile(t, filepath.Join(repo, "skills", "review", "SKILL.md"),
+		"---\nname: review\ndescription: Review code.\nmetadata:\n  version: \"1.0.0\"\n  requires: \"code-review@^1 db@@1\"\n---\n")
+	testutil.Commit(t, repo, "invalid string requirements")
+	testutil.Git(t, repo, "push", "origin", "main")
+	err := requireReleaseFailureWithoutTags(t, repo, "origin", `metadata.requires entry 2 "db@@1" at line 6`)
+	var validation *dependency.ValidationError
+	if !errors.As(err, &validation) {
+		t.Fatalf("missing validation error: %v", err)
+	}
+}

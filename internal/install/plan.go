@@ -32,6 +32,7 @@ type installSources struct {
 	unavailable map[string]bool // legacy trees that are missing or modified
 	fetched     map[string]bool
 	releases    map[string][]dependency.Release
+	metadata    map[string]skill.Meta // exact-commit locations for reference errors
 }
 
 // Pin constraints belong to the planner, allowing release search to backtrack
@@ -147,7 +148,7 @@ func (a *installSources) Requires(alias, name, commit string) ([]string, error) 
 	if err != nil {
 		return nil, err
 	}
-	raw, err := s.Requires(name, commit)
+	meta, err := s.SkillMetadata(name, commit)
 	var metadata *source.MetadataError
 	if errors.As(err, &metadata) {
 		return nil, &dependency.ValidationError{Location: name + "/SKILL.md", Err: err}
@@ -155,7 +156,17 @@ func (a *installSources) Requires(alias, name, commit string) ([]string, error) 
 	if err != nil {
 		return nil, &dependency.AccessError{Source: alias, Name: name, Commit: commit, Operation: "read requirements", Err: err}
 	}
-	return raw, nil
+	if a.metadata == nil {
+		a.metadata = make(map[string]skill.Meta)
+	}
+	a.metadata[alias+"/"+name+"@"+commit] = meta
+	return meta.Requires, nil
+}
+
+// RequirementLocation supplies frontmatter context without changing validation
+// or candidate selection in the planner.
+func (a *installSources) RequirementLocation(alias, name, commit string, i int) string {
+	return a.metadata[alias+"/"+name+"@"+commit].RequirementLocation(i)
 }
 
 func planAndInstall(opts Options, ref *string) (err error) {
@@ -404,7 +415,7 @@ func planningManifest(p paths, m *manifest.Manifest, access *installSources, tar
 		}
 		// Verified legacy trees need no source IO. Foreign metadata.requires
 		// outside the requested closure, and on legacy pins during restore, is
-		// unknown. A sequence that contains "@" is kitt-shaped and is an error.
+		// unknown. A string or sequence containing "@" is kitt-shaped and stays an error.
 		raw, matched, err := installedRequirements(p, s, name)
 		if err != nil {
 			if (!access.targets[name] || access.restore) && matched && foreignRequires(filepath.Join(p.skillsDir, name, "SKILL.md"), err) {
@@ -585,7 +596,7 @@ func installedRequirements(p paths, s *manifest.Skill, name string) (raw []strin
 	if err != nil {
 		return nil, true, validationError(err)
 	}
-	raw, err = dependency.NormalizeRequirements(meta.Requires, s.Source, false)
+	raw, err = dependency.NormalizeMetadataRequirements(meta, s.Source)
 	return raw, true, err
 }
 
@@ -618,7 +629,7 @@ func pinnedRequirements(p paths, s *manifest.Skill, name string, access *install
 		if err != nil {
 			return nil, validationError(err)
 		}
-		return dependency.NormalizeRequirements(meta.Requires, s.Source, false)
+		return dependency.NormalizeMetadataRequirements(meta, s.Source)
 	}
 	raw, err := access.Requires(s.Source, name, s.Resolved.Commit)
 	if err != nil {
