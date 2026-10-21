@@ -37,7 +37,11 @@ func Upgrade(opts Options, name string, major bool) (err error) {
 		return validationError(err)
 	}
 	access := &installSources{current: m, opened: map[string]*source.Source{}, paths: p}
-	current, err := planningManifest(p, m, access)
+	requested := make([]dependency.Target, 0, len(names))
+	for _, name := range names {
+		requested = append(requested, dependency.Target{Name: name})
+	}
+	current, err := planningManifest(p, m, access, requested...)
 	if err != nil {
 		return err
 	}
@@ -45,15 +49,19 @@ func Upgrade(opts Options, name string, major bool) (err error) {
 	if err != nil {
 		return err
 	}
-	plan, err := buildUpgradePlan(p, current, targets, access, name == "")
+	plan, err := buildUpgradePlan(p, current, targets, access, name == "" || major)
 	if err != nil {
 		return err
 	}
+	preserveUnknownRequirementPins(m, plan, access.unknown)
 	// Preserve the established caret-floor update for direct upgrade targets.
 	// Transitive entries keep their own (normally absent) manifest constraint.
 	for i := range plan.Nodes {
 		n := &plan.Nodes[i]
 		old := m.Skills[n.Name]
+		if !n.Direct && slices.Contains(names, n.Name) {
+			n.Constraint = old.Version
+		}
 		if n.Direct && slices.Contains(names, n.Name) && !exactPin(old.Version) {
 			n.Constraint = old.Version
 			if n.Version != "" && (old.Resolved == nil || old.Resolved.Commit != n.Commit) {
@@ -152,7 +160,7 @@ func upgradePlanTargets(m *manifest.Manifest, names []string, major bool, access
 		if major && s.IsDirect() && latest != "" {
 			// --major may replace the target's own range, never an incoming edge.
 			t.AllowMajor = true
-		} else if s.IsDirect() && s.Version == "" && s.Resolved != nil && s.Resolved.Version != "" {
+		} else if s.Version == "" && s.Resolved != nil && s.Resolved.Version != "" && (s.IsDirect() || !major && !hasIncomingRequirement(m, name)) {
 			t.Constraint = "^" + s.Resolved.Version
 		}
 		constraint := t.Constraint
@@ -274,13 +282,13 @@ func versionMajor(v string) (int, error) {
 	return n, nil
 }
 
-// First propose preferred direct releases together. A bulk target refused by
-// dependents retries within their final ranges; other graph failures still fail.
-func buildUpgradePlan(p paths, current *manifest.Manifest, targets []dependency.Target, access *installSources, bulk bool) (*dependency.Plan, error) {
+// First propose preferred direct releases together. Bulk and --major requests
+// retry refused targets within their dependents' final ranges.
+func buildUpgradePlan(p paths, current *manifest.Manifest, targets []dependency.Target, access *installSources, fallback bool) (*dependency.Plan, error) {
 	for {
-		plan, err := dependency.BuildPlan(dependency.Scope{Global: p.global, ManifestPath: p.manifest, Command: "upgrade"}, current, targets, access)
+		plan, err := buildDependencyPlan(p, current, targets, access, "upgrade")
 		var refusal *dependency.UpgradeRefusalError
-		if !bulk || !errors.As(err, &refusal) {
+		if !fallback || !errors.As(err, &refusal) {
 			return plan, err
 		}
 		changed := false
@@ -295,4 +303,20 @@ func buildUpgradePlan(p paths, current *manifest.Manifest, targets []dependency.
 			return nil, err
 		}
 	}
+}
+
+// Use the known graph rather than possibly stale via when bounding an orphan.
+func hasIncomingRequirement(m *manifest.Manifest, name string) bool {
+	for _, s := range m.Skills {
+		if s == nil || s.Resolved == nil || s.Resolved.Requires == nil {
+			continue
+		}
+		for _, text := range *s.Resolved.Requires {
+			ref, err := dependency.ParseSnapshotRef(text)
+			if err == nil && ref.Name == name {
+				return true
+			}
+		}
+	}
+	return false
 }

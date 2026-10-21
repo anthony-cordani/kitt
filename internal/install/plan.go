@@ -22,15 +22,16 @@ import (
 // installSources separates selecting releases from reading exact commits. Exact
 // reads use the cache first, including when the original repository is gone.
 type installSources struct {
-	current  *manifest.Manifest
-	restore  bool
-	opened   map[string]*source.Source
-	paths    paths
-	targets  map[string]bool
-	legacy   map[string]bool
-	unknown  map[string]bool // legacy pins outside the request whose tree cannot be read
-	fetched  map[string]bool
-	releases map[string][]dependency.Release
+	current    *manifest.Manifest
+	restore    bool
+	opened     map[string]*source.Source
+	paths      paths
+	targets    map[string]bool
+	legacy     map[string]bool
+	unknown    map[string]bool // legacy pins outside the request whose tree cannot be read
+	unverified map[string]bool // legacy parents without authoritative installed requirements
+	fetched    map[string]bool
+	releases   map[string][]dependency.Release
 }
 
 // Pin constraints belong to the planner, allowing release search to backtrack
@@ -191,7 +192,7 @@ func planAndInstall(opts Options, ref *string) (err error) {
 	if err != nil {
 		return err
 	}
-	plan, err := buildInstallPlan(p, current, targets, access)
+	plan, err := buildDependencyPlan(p, current, targets, access, "")
 	if err != nil {
 		return err
 	}
@@ -276,6 +277,8 @@ func stageAndApplyPlan(p paths, m *manifest.Manifest, plan *dependency.Plan, acc
 		if err != nil && !committed {
 			if rollbackErr := tx.rollback(); rollbackErr != nil {
 				err = errors.Join(err, rollbackErr)
+			} else {
+				err = &dependency.PlanError{Err: err, ManagedStateUntouched: true}
 			}
 		}
 	}()
@@ -369,6 +372,7 @@ func planningManifest(p paths, m *manifest.Manifest, access *installSources, tar
 	access.targets = map[string]bool{}
 	access.legacy = map[string]bool{}
 	access.unknown = map[string]bool{}
+	access.unverified = map[string]bool{}
 	for _, target := range targets {
 		access.targets[target.Name] = true
 	}
@@ -397,26 +401,32 @@ func planningManifest(p paths, m *manifest.Manifest, access *installSources, tar
 		if pin.Requires != nil {
 			continue
 		}
-		if !access.restore && targets != nil && !access.targets[name] {
-			// A hash-verified tree is authoritative and free to read. A missing
-			// or modified tree is not, and must not cause source IO from here.
-			// The requested closure may still load it later; otherwise it stays
-			// unknown and cannot rewrite via or orphan another entry.
-			raw, matched, err := installedRequirements(p, s, name)
-			if err != nil {
+		// Verified legacy trees need no source IO. Non-kitt requires metadata
+		// outside the requested closure is unknown, rather than a fatal input.
+		raw, matched, err := installedRequirements(p, s, name)
+		if !access.restore && (!matched || err != nil) {
+			access.unverified[name] = true
+		}
+		if err != nil {
+			if (!access.targets[name] || access.restore) && matched && strings.Contains(err.Error(), "metadata.requires") {
+				fmt.Fprintf(os.Stderr, "warning: requirements for %s are unknown: %v\n", name, err)
+			} else {
 				return nil, err
 			}
-			if matched {
-				pin.Requires = &raw
-				continue
-			}
+		} else if matched {
+			pin.Requires = &raw
+			continue
+		}
+		if err != nil || !access.restore && !access.targets[name] {
+			// A missing or modified unrelated tree is not authoritative. If the
+			// requested closure reaches it, buildDependencyPlan loads the pin.
 			access.legacy[name] = true
 			access.unknown[name] = true
 			empty := []string{}
 			pin.Requires = &empty
 			continue
 		}
-		raw, err := pinnedRequirements(p, s, name, access)
+		raw, err = pinnedRequirements(p, s, name, access)
 		if err != nil {
 			return nil, err
 		}
@@ -447,9 +457,9 @@ func planningManifest(p paths, m *manifest.Manifest, access *installSources, tar
 }
 
 // Load legacy metadata only when the requested closure actually reaches it.
-func buildInstallPlan(p paths, current *manifest.Manifest, targets []dependency.Target, access *installSources) (*dependency.Plan, error) {
+func buildDependencyPlan(p paths, current *manifest.Manifest, targets []dependency.Target, access *installSources, command string) (*dependency.Plan, error) {
 	for {
-		plan, err := dependency.BuildPlan(dependency.Scope{Global: p.global, ManifestPath: p.manifest}, current, targets, access)
+		plan, err := dependency.BuildPlan(dependency.Scope{Global: p.global, ManifestPath: p.manifest, Command: command}, current, targets, access)
 		if err != nil {
 			return nil, err
 		}
@@ -490,6 +500,9 @@ func buildInstallPlan(p paths, current *manifest.Manifest, targets []dependency.
 			}
 		}
 		if !changed {
+			if err := verifyUnknownParents(access.current, plan, access.unverified); err != nil {
+				return nil, validationError(err)
+			}
 			return plan, nil
 		}
 	}
@@ -538,15 +551,13 @@ func plannedManifest(m *manifest.Manifest, plan *dependency.Plan, staged map[str
 		}
 		snapshots = snapshots || len(n.Requires) > 0
 	}
-	// Unknown requirements hide edges. Keep an existing dependency manifest
-	// instead of dropping via and direct when every known requires list is empty.
+	// Retained transitive entries need their graph keys even after the last
+	// edge disappears. Unknown parents may also hide recorded via edges.
 	keepGraph := snapshots
-	if len(unknown) > 0 {
-		for _, n := range plan.Nodes {
-			if len(n.Via) > 0 || !n.Direct {
-				keepGraph = true
-				break
-			}
+	for _, n := range plan.Nodes {
+		if !n.Direct || len(n.Via) > 0 {
+			keepGraph = true
+			break
 		}
 	}
 	for _, n := range plan.Nodes {
@@ -564,7 +575,7 @@ func plannedManifest(m *manifest.Manifest, plan *dependency.Plan, staged map[str
 			s.Version = "^" + n.Version
 		}
 		s.Resolved = &manifest.Resolved{Version: n.Version, Commit: n.Commit, Hash: staged[n.Name].hash}
-		writeRequires := snapshots && !unknown[n.Name]
+		writeRequires := keepGraph && !unknown[n.Name]
 		if !writeRequires && len(unknown) > 0 && !unknown[n.Name] && old != nil && old.Resolved != nil && old.Resolved.Requires != nil {
 			writeRequires = true
 		}
@@ -612,6 +623,23 @@ func preserveUnknownRequirementPins(original *manifest.Manifest, plan *dependenc
 		n.Via = slices.Compact(n.Via)
 	}
 	plan.Orphans = reachableOrphans(plan.Nodes)
+}
+
+// A recorded edge from an unverifiable legacy parent still protects its child.
+// Restoring that parent establishes an authoritative requirements snapshot.
+func verifyUnknownParents(original *manifest.Manifest, plan *dependency.Plan, unverified map[string]bool) error {
+	for _, n := range plan.Nodes {
+		s := original.Skills[n.Name]
+		if s == nil || s.Resolved == nil || s.Source == n.Source && s.Resolved.Commit == n.Commit {
+			continue
+		}
+		for _, parent := range s.Via {
+			if unverified[parent] {
+				return fmt.Errorf("cannot verify that %s accepts %s %s; run `kitt install` to restore %s first", parent, n.Name, versionLabel(n.Version, n.Commit), parent)
+			}
+		}
+	}
+	return nil
 }
 
 func reachableOrphans(nodes []dependency.Node) []string {
@@ -666,16 +694,23 @@ func installError(err error) error {
 	if err == nil {
 		return nil
 	}
-	var access *dependency.AccessError
-	for errors.As(err, &access) {
-		err = access.Err
-	}
-	if err == nil {
-		return nil
-	}
 	var plan *dependency.PlanError
 	if errors.As(err, &plan) {
 		return err
+	}
+	var access *dependency.AccessError
+	if errors.As(err, &access) {
+		for {
+			var inner *dependency.AccessError
+			if !errors.As(access.Err, &inner) {
+				break
+			}
+			access = inner
+		}
+		if access.Name != "" && access.Commit != "" {
+			return fmt.Errorf("%s %s/%s at %s: %w", access.Operation, access.Source, access.Name, shortCommit(access.Commit), access.Err)
+		}
+		return access.Err
 	}
 	var validation *dependency.ValidationError
 	if errors.As(err, &validation) {

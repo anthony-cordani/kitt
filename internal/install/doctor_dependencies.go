@@ -86,7 +86,7 @@ func (d *doctor) dependencies(m *manifest.Manifest, names []string) error {
 	}
 	for _, n := range nodes {
 		for _, text := range n.Requires {
-			r, _ := dependency.ParseRef(text)
+			r, _ := dependency.ParseSnapshotRef(text)
 			if _, ok := m.Sources[r.Source]; !ok {
 				d.line(fmt.Sprintf("wrong source: %s requires %q (unknown source alias %q in manifest)", n.Name, text, r.Source))
 			}

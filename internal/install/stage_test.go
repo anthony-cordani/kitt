@@ -65,12 +65,12 @@ func TestStagingInsideSkillsAndSweepsOnlyOlderPlans(t *testing.T) {
 	if err := sweepStaging(dir, started); err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{oldPlan, oldBackup} {
+	for _, path := range []string{oldPlan} {
 		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("%s still exists: %v", path, err)
 		}
 	}
-	for _, path := range []string{freshPlan, freshBackup} {
+	for _, path := range []string{freshPlan, oldBackup, freshBackup} {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("current staging must survive: %s: %v", path, err)
 		}
@@ -86,7 +86,7 @@ func TestSweepIgnoresUnreadableDir(t *testing.T) {
 	if err := sweepStaging(dir, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(stderr(), "warning:") {
+	if runtime.GOOS != "windows" && !strings.Contains(stderr(), "warning:") {
 		t.Fatalf("stderr = %q", stderr())
 	}
 }
@@ -239,7 +239,7 @@ func TestApplyTransactionRollbackAndRetry(t *testing.T) {
 					t.Fatalf("%s hook did not fire: %v", failure, err)
 				}
 				var pe *dependency.PlanError
-				if err == nil || errors.As(err, &pe) {
+				if err == nil || !errors.As(err, &pe) || !pe.ManagedStateUntouched {
 					t.Fatalf("rollback diagnostic: %v", err)
 				}
 				if after := transactionSnapshot(t, p); !reflect.DeepEqual(before, after) {
@@ -351,7 +351,7 @@ func TestFirstApplyRollbackAndRetry(t *testing.T) {
 			err := Add(opts, "root")
 			applyTestHook = nil
 			var pe *dependency.PlanError
-			if !fired || err == nil || errors.As(err, &pe) {
+			if !fired || err == nil || !errors.As(err, &pe) || !pe.ManagedStateUntouched {
 				t.Fatalf("error = %v", err)
 			}
 			if !reflect.DeepEqual(before, transactionSnapshot(t, p)) {
@@ -390,7 +390,7 @@ func TestFinishRollbackRestoresSymlinkedFileBytes(t *testing.T) {
 	err := Add(opts, "foo")
 	applyTestHook = nil
 	var pe *dependency.PlanError
-	if err == nil || errors.As(err, &pe) {
+	if err == nil || !errors.As(err, &pe) || !pe.ManagedStateUntouched {
 		t.Fatalf("rollback: %v", err)
 	}
 	data, err := os.ReadFile(target)
@@ -537,4 +537,54 @@ func captureStderr(t *testing.T) func() string {
 	}
 	t.Cleanup(func() { _ = stop() })
 	return stop
+}
+
+func TestOldPlanRemovalFailureStillInstallsWithWarning(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory permissions do not reproduce RemoveAll failure on Windows")
+	}
+	p, opts, repo := transactionFixture(t, false)
+	transactionRelease(t, repo, "foo", "1.0.0")
+	old := filepath.Join(p.skillsDir, tempPrefix+"plan-locked")
+	locked := filepath.Join(old, "locked")
+	testutil.WriteFile(t, filepath.Join(locked, "keep"), "abandoned staging")
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+	if err := os.RemoveAll(old); err == nil {
+		t.Skip("permissions do not prevent RemoveAll for this user")
+	}
+	abandoned := time.Now().Add(-(abandonedStagingAge + time.Hour))
+	if err := os.Chtimes(old, abandoned, abandoned); err != nil {
+		t.Fatal(err)
+	}
+	stderr := captureStderr(t)
+	var stdout bytes.Buffer
+	opts.Out = &stdout
+	err := Add(opts, "foo")
+	warning := stderr()
+	if err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if !strings.Contains(warning, "warning: could not remove "+old) {
+		t.Fatalf("stderr = %q", warning)
+	}
+	if !strings.Contains(stdout.String(), "added foo 1.0.0") {
+		t.Fatalf("stdout = %q", &stdout)
+	}
+	if _, err := os.Stat(filepath.Join(p.skillsDir, "foo", "SKILL.md")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRequirementsAccessErrorsKeepOperationSkillAndCommit(t *testing.T) {
+	cause := errors.New("git read failed")
+	access := &dependency.AccessError{Operation: "read requirements", Source: "team", Name: "code-review", Commit: "1234567890abcdef", Err: cause}
+	// The planner may add another access wrapper around the adapter error.
+	err := installError(&dependency.AccessError{Operation: "read requirements", Source: "team", Name: "code-review", Commit: access.Commit, Err: access})
+	want := "read requirements team/code-review at " + shortCommit(access.Commit) + ": git read failed"
+	if err == nil || err.Error() != want || !errors.Is(err, cause) {
+		t.Fatalf("error = %v; want %s", err, want)
+	}
 }

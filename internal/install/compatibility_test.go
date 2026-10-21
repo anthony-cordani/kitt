@@ -104,8 +104,12 @@ func TestDependencyKeysFollowFinalEdges(t *testing.T) {
 	}
 	dependencyRelease(t, f.repo, "root", "1.2.0")
 	f.upgrade(t, "root", false)
-	assertMainManifest(t, f.path)
+	if loadManifest(t, f.path).Skills["leaf"].IsDirect() {
+		t.Fatal("orphan was promoted")
+	}
 	f.restore(t)
+	// Once the user promotes the last orphan, the old manifest format returns.
+	f.add(t, "leaf")
 	assertMainManifest(t, f.path)
 }
 
@@ -244,21 +248,18 @@ func TestUpgradeBulkTransitiveSmokeAndMajorNotes(t *testing.T) {
 					t.Fatalf("bulk upgrade: %s, %+v", out, s)
 				}
 				dependencyRelease(t, f.repo, "code-review", "2.0.0")
+				dependencyRelease(t, f.repo, "code-review", "1.2.0")
 				name := "code-review"
 				if bulk {
 					name = ""
-				}
-				// Named direct upgrades intentionally retain the existing refusal contract.
-				if direct && !bulk {
-					return
 				}
 				out = f.upgrade(t, name, true)
 				want := "code-review 2.0.0 is available but demo/us-deliver@1.0.0 requires ^1.0.0"
 				if !strings.Contains(out, want) {
 					t.Fatalf("missing note %q:\n%s", want, out)
 				}
-				if loadManifest(t, f.path).Skills["code-review"].Resolved.Version != "1.1.0" {
-					t.Fatal("blocked major installed")
+				if loadManifest(t, f.path).Skills["code-review"].Resolved.Version != "1.2.0" {
+					t.Fatal("did not select highest allowed release")
 				}
 			})
 		}
@@ -294,8 +295,22 @@ func TestRequirementsCanInheritLegacySourceAliases(t *testing.T) {
 			m := loadManifest(t, f.path)
 			m.Sources = map[string]string{alias: testutil.URL(f.repo)}
 			f.save(t, m)
+			testutil.WriteFile(t, filepath.Join(f.root, "AGENTS.md"), healthyAgents)
 			f.add(t, "root")
+			checkDiagnostics := func() {
+				t.Helper()
+				if n, out := fixtureDoctor(t, f); n != 0 || out != "ok\n" {
+					t.Fatalf("doctor = %d, %s", n, out)
+				}
+				out := mustList(t, f.root)
+				want := "`-- " + alias + "/leaf@1.0.0 (requires ^1)"
+				if !strings.Contains(out, want) || strings.Contains(out, "Orphaned") {
+					t.Fatalf("list = %s", out)
+				}
+			}
+			checkDiagnostics()
 			f.restore(t)
+			checkDiagnostics()
 			dependencyRelease(t, f.repo, "leaf", "1.1.0")
 			f.upgrade(t, "", false)
 			if loadManifest(t, f.path).Skills["leaf"].Resolved.Version != "1.1.0" {

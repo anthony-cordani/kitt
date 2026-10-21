@@ -90,7 +90,7 @@ func TestListLegacyFormatting(t *testing.T) {
 	}
 }
 
-func TestListNoDependencyEdgesMatchesMain(t *testing.T) {
+func TestListNoDependencyEdges(t *testing.T) {
 	for _, keys := range []string{"absent", "empty snapshots", "transitive flag only"} {
 		for _, missing := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/missing=%v", keys, missing), func(t *testing.T) {
@@ -114,8 +114,15 @@ func TestListNoDependencyEdgesMatchesMain(t *testing.T) {
 					}
 					want = "Installed:\n  review  not installed  demo\nAvailable in demo:\n  review  1.4.0  installed\n"
 				}
+				if keys == "transitive flag only" {
+					label := "1.4.0"
+					if missing {
+						label += " [not installed]"
+					}
+					want = "Installed:\nOrphaned transitive skills:\n  demo/review@" + label + " (requested ^1.4.0)\nAvailable in demo:\n  review  1.4.0  installed\n"
+				}
 				if got := mustList(t, project); got != want {
-					t.Fatalf("list = %q, want main's %q", got, want)
+					t.Fatalf("list = %q, want %q", got, want)
 				}
 			})
 		}

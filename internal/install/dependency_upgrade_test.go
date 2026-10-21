@@ -86,7 +86,7 @@ func TestUpgradeMajorDirectWithoutDependents(t *testing.T) {
 	}
 }
 
-func TestUpgradeDependencyRefusalListsEveryBlocker(t *testing.T) {
+func TestUpgradeDependencyBlockersListEveryDependent(t *testing.T) {
 	for _, global := range []bool{false, true} {
 		for _, major := range []bool{false, true} {
 			t.Run(fmt.Sprintf("global=%t/major=%t", global, major), func(t *testing.T) {
@@ -107,6 +107,17 @@ func TestUpgradeDependencyRefusalListsEveryBlocker(t *testing.T) {
 					t.Fatal(err)
 				}
 				before := f.snapshot(t)
+				if major {
+					out := f.upgrade(t, "leaf", true)
+					for _, parent := range []string{"alpha", "zulu"} {
+						want := "leaf " + next + " is available but demo/" + parent + "@1.0.0 requires 1.0.0"
+						if !strings.Contains(out, want) {
+							t.Fatalf("missing blocker %q: %s", want, out)
+						}
+					}
+					assertResolved(t, loadManifest(t, f.path).Skills["leaf"], "^1", "1.0.0")
+					return
+				}
 				err := install.Upgrade(f.opts, "leaf", major)
 				want := "cannot upgrade demo/leaf from 1.0.0 to " + next + "\n  demo/alpha@1.0.0 requires 1.0.0\n  demo/zulu@1.0.0 requires 1.0.0"
 				assertUntouchedError(t, err, want)
@@ -136,8 +147,10 @@ func TestUpgradeMajorBulkMovesDependentAndDependencyTogether(t *testing.T) {
 				dependencyRelease(t, f.repo, dep, "2.0.0")
 				dependencyRelease(t, f.repo, parent, "2.0.0", dep+"@^2")
 				before := f.snapshot(t)
-				err := install.Upgrade(f.opts, dep, true)
-				assertUntouchedError(t, err, "cannot upgrade demo/"+dep+" from 1.0.0 to 2.0.0\n  demo/"+parent+"@1.0.0 requires ^1")
+				out := f.upgrade(t, dep, true)
+				if !strings.Contains(out, dep+" 2.0.0 is available but demo/"+parent+"@1.0.0 requires ^1") {
+					t.Fatalf("missing blocked major note: %s", out)
+				}
 				assertSameTree(t, before, f.snapshot(t))
 				f.upgrade(t, "", true)
 				m := loadManifest(t, f.path)
@@ -298,6 +311,34 @@ func TestInstallCaretCannotBypassDependentConstraint(t *testing.T) {
 			assertUntouchedError(t, err, "cannot install demo/leaf from 1.0.0 to 2.0.0\n  demo/root@1.0.0 requires ^1")
 			assertSameTree(t, before, f.snapshot(t))
 			assertNoTempDirs(t, f.root)
+		})
+	}
+}
+
+func TestBulkUpgradeBoundsOrphanToCurrentCaret(t *testing.T) {
+	for _, remainingEdge := range []bool{false, true} {
+		t.Run(fmt.Sprint(remainingEdge), func(t *testing.T) {
+			f := dependencyScope(t, false)
+			dependencyRelease(t, f.repo, "leaf", "1.0.0")
+			dependencyRelease(t, f.repo, "root", "1.0.0", "leaf@^1")
+			if remainingEdge {
+				dependencyRelease(t, f.repo, "child", "1.0.0")
+				dependencyRelease(t, f.repo, "guard", "1.0.0", "child@^1")
+				f.add(t, "guard")
+			}
+			f.add(t, "root")
+			dependencyRelease(t, f.repo, "root", "1.1.0")
+			f.upgrade(t, "root", false)
+			dependencyRelease(t, f.repo, "leaf", "1.5.0")
+			dependencyRelease(t, f.repo, "leaf", "2.0.0")
+			f.upgrade(t, "", false)
+			leaf := loadManifest(t, f.path).Skills["leaf"]
+			assertResolved(t, leaf, "", "1.5.0")
+			if leaf.IsDirect() {
+				t.Fatal("orphan promoted")
+			}
+			f.upgrade(t, "", true)
+			assertResolved(t, loadManifest(t, f.path).Skills["leaf"], "", "2.0.0")
 		})
 	}
 }

@@ -7,7 +7,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"slices"
 	"sort"
 	"text/tabwriter"
 
@@ -63,7 +62,7 @@ func dependencyAware(m *manifest.Manifest) bool {
 
 func writeDependencyTree(out io.Writer, skillsDir string, m *manifest.Manifest, names []string) error {
 	var nodes []dependency.Node
-	hasEdges := false
+	hasDependencies := false
 	children := make(map[string][]dependency.Ref)
 	labels := make(map[string]string)
 	known := make(map[string]bool)
@@ -106,14 +105,15 @@ func writeDependencyTree(out io.Writer, skillsDir string, m *manifest.Manifest, 
 			known[name] = false
 		}
 		for _, text := range n.Requires {
-			r, _ := dependency.ParseRef(text)
+			r, _ := dependency.ParseSnapshotRef(text)
 			children[name] = append(children[name], r)
 		}
-		hasEdges = hasEdges || len(n.Requires) > 0 || len(s.Via) > 0
+		hasDependencies = hasDependencies || len(n.Requires) > 0 || len(s.Via) > 0 || !s.IsDirect()
 		nodes = append(nodes, n)
 	}
-	// Empty snapshots and direct flags alone do not change main's flat format.
-	if !hasEdges {
+	// Empty snapshots alone do not change main's flat format. Retained
+	// transitive entries still need the orphan section after the last edge goes.
+	if !hasDependencies {
 		return writeInstalled(out, skillsDir, m.Skills, names)
 	}
 	graph := dependency.AnalyzeGraph(nodes)
@@ -127,7 +127,7 @@ func writeDependencyTree(out io.Writer, skillsDir string, m *manifest.Manifest, 
 		}
 		line := fmt.Sprintf("%s/%s@%s", s.Source, name, labels[name])
 		if requested != "" {
-			r, _ := dependency.ParseRef(requested)
+			r, _ := dependency.ParseSnapshotRef(requested)
 			line += " (requires " + r.Constraint + ")"
 		} else if s.Version != "" {
 			line += " (requested " + s.Version + ")"
@@ -215,23 +215,23 @@ func listReachabilityIncomplete(names []string, m *manifest.Manifest, known map[
 // diagnosticRequirements shares reference normalization between list and doctor.
 // Keep valid edges even when a hand-edited snapshot contains malformed entries.
 func diagnosticRequirements(alias string, raw []string) ([]string, []error) {
-	var refs []dependency.Ref
+	var valid []string
 	var problems []error
 	for i, text := range raw {
-		r, err := dependency.ParseRef(text)
+		normalized, err := dependency.NormalizeRequirements([]string{text}, alias, true)
 		if err != nil {
+			var validation *dependency.ValidationError
+			if errors.As(err, &validation) {
+				err = validation.Err
+			}
 			problems = append(problems, fmt.Errorf("requires[%d]: %w", i, err))
 			continue
 		}
-		refs = append(refs, r)
+		valid = append(valid, normalized...)
 	}
-	var normalized []string
-	for _, group := range dependency.GroupRefs(refs, alias) {
-		for _, r := range group {
-			normalized = append(normalized, r.String())
-		}
-	}
-	slices.Sort(normalized)
+	// Valid entries are normalized together for the same sorting and deduplication
+	// as the planner, without losing good edges beside a malformed entry.
+	normalized, _ := dependency.NormalizeRequirements(valid, alias, true)
 	return normalized, problems
 }
 

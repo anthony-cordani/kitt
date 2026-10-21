@@ -356,11 +356,23 @@ func TestDependencyOrphanRetention(t *testing.T) {
 			f.add(t, "root@2.0.0")
 			f.restore(t)
 			leaf := loadManifest(t, f.path).Skills["leaf"]
-			pin.Requires = nil
-			if leaf == nil || leaf.Direct != nil || len(leaf.Via) != 0 || !reflect.DeepEqual(*leaf.Resolved, pin) {
-				t.Fatalf("retained orphan must drop dependency keys with the last edge: %+v", leaf)
+			if leaf == nil || leaf.IsDirect() || len(leaf.Via) != 0 || !reflect.DeepEqual(*leaf.Resolved, pin) {
+				t.Fatalf("retained orphan must remain transitive after the last edge disappears: %+v", leaf)
 			}
 			assertLinkResolves(t, claudePath(f.root, "leaf"), skillPath(f.root, "leaf"))
+			_, doctor := fixtureDoctor(t, f)
+			if !strings.Contains(doctor, "orphaned dependency: leaf") {
+				t.Fatalf("orphan not reported: %s", doctor)
+			}
+			var list strings.Builder
+			opts := f.opts
+			opts.Out = &list
+			if err := install.List(opts); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(list.String(), "Orphaned transitive skills:") || !strings.Contains(list.String(), "demo/leaf@1.0.0") {
+				t.Fatalf("orphan not listed: %s", &list)
+			}
 		})
 	}
 }
@@ -657,7 +669,7 @@ func TestSymlinkedClaudeSkillsDirPreservesSkillContent(t *testing.T) {
 			}
 			assertSkillKept(t, f.root, "other", other)
 			parent := filepath.Join(f.root, ".claude", "skills")
-			if got, err := os.Readlink(parent); err != nil || got != "../.agents/skills" {
+			if got, err := os.Readlink(parent); err != nil || filepath.Clean(got) != filepath.FromSlash("../.agents/skills") {
 				t.Fatalf("skills parent link = %q, %v", got, err)
 			}
 		})
@@ -851,5 +863,60 @@ func assertLinkUntouched(t *testing.T, path string, before os.FileInfo, target s
 	}
 	if !os.SameFile(before, info) || got != target {
 		t.Fatalf("%s was recreated (same=%v, target %q, want %q)", path, os.SameFile(before, info), got, target)
+	}
+}
+
+func TestUnknownLegacyParentRefusesDependencyMovement(t *testing.T) {
+	for _, missing := range []bool{false, true} {
+		for _, operation := range []string{"install", "upgrade", "major upgrade", "bulk upgrade", "install parent", "upgrade parent"} {
+			t.Run(fmt.Sprintf("missing=%t/%s", missing, operation), func(t *testing.T) {
+				f := dependencyScope(t, false)
+				dependencyRelease(t, f.repo, "leaf", "1.0.0")
+				dependencyRelease(t, f.repo, "a", "1.0.0", "leaf@^1")
+				f.add(t, "a")
+				m := loadManifest(t, f.path)
+				m.Skills["a"].Resolved.Requires = nil
+				f.save(t, m)
+				if missing {
+					if err := os.RemoveAll(skillPath(f.root, "a")); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					testutil.WriteFile(t, filepath.Join(skillPath(f.root, "a"), "SKILL.md"), "local edit\n")
+				}
+				dependencyRelease(t, f.repo, "leaf", "1.1.0")
+				dependencyRelease(t, f.repo, "leaf", "2.0.0")
+				if operation == "install parent" || operation == "upgrade parent" {
+					dependencyRelease(t, f.repo, "a", "2.0.0", "leaf@^2")
+				}
+				before := f.snapshot(t)
+				version := "1.1.0"
+				var err error
+				if operation == "install" {
+					version = "2.0.0"
+					err = install.Add(f.opts, "leaf@^2")
+				} else if operation == "install parent" {
+					version = "2.0.0"
+					err = install.Add(f.opts, "a@^2")
+				} else {
+					major := operation == "major upgrade" || operation == "upgrade parent"
+					if major {
+						version = "2.0.0"
+					}
+					name := "leaf"
+					if operation == "bulk upgrade" {
+						name = ""
+					}
+					if operation == "upgrade parent" {
+						name = "a"
+					}
+					err = install.Upgrade(f.opts, name, major)
+				}
+				want := "cannot verify that a accepts leaf " + version + "; run `kitt install` to restore a first"
+				assertUntouchedError(t, err, want)
+				assertSameTree(t, before, f.snapshot(t))
+				assertNoTempDirs(t, f.root)
+			})
+		}
 	}
 }

@@ -267,12 +267,13 @@ func applyStep(step, path string) error {
 	return nil
 }
 
-// Staging trees and backups older than this belong to an abandoned run.
+// Staging trees older than this belong to an abandoned run.
 // Anything newer may be a concurrent install and is left alone.
 const abandonedStagingAge = 24 * time.Hour
 
-// sweepStaging removes abandoned .kitt-tmp-plan-* and .kitt-tmp-backup-*
-// directories. Failures are warnings: a locked leftover must not abort install.
+// sweepStaging removes abandoned .kitt-tmp-plan-* directories. Backups may
+// contain the only copy of user content and must never be swept automatically.
+// Failures are warnings: a locked leftover must not abort install.
 func sweepStaging(dir string, started time.Time) error {
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -285,7 +286,7 @@ func sweepStaging(dir string, started time.Time) error {
 	cutoff := started.Add(-abandonedStagingAge)
 	for _, entry := range entries {
 		name := entry.Name()
-		if !entry.IsDir() || (!strings.HasPrefix(name, tempPrefix+"plan-") && !strings.HasPrefix(name, tempPrefix+"backup-")) {
+		if !entry.IsDir() || !strings.HasPrefix(name, tempPrefix+"plan-") {
 			continue
 		}
 		info, err := entry.Info()
