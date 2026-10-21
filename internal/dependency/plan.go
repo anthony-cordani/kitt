@@ -1,0 +1,408 @@
+package dependency
+
+import (
+	"fmt"
+	"maps"
+	"slices"
+	"strings"
+
+	"github.com/anthony-cordani/kitt/internal/manifest"
+	"github.com/anthony-cordani/kitt/internal/source"
+	"golang.org/x/mod/semver"
+)
+
+// Release is a published plain X.Y.Z version and its exact commit.
+type Release struct{ Version, Commit string }
+
+// SourceAccess supplies published releases and metadata at an exact commit.
+// Implementations must not read requirements from a branch tip instead of commit.
+type SourceAccess interface {
+	Releases(source, skill string) ([]Release, error)
+	Requires(source, skill, commit string) ([]string, error)
+}
+
+// TipAccess optionally supports a new, unconstrained direct install without tags.
+// A branch tip can never satisfy a dependency's explicit range.
+type TipAccess interface {
+	Tip(source, skill string) (Release, error)
+}
+
+// CandidatePolicy controls explicit targets. Install without a constraint retains
+// an existing pin (and promotes it). Upgrade selects the highest permitted release.
+type CandidatePolicy string
+
+const (
+	Install CandidatePolicy = "install"
+	Upgrade CandidatePolicy = "upgrade"
+)
+
+// Target requests a direct skill. Source may be omitted for an existing entry or
+// a manifest with one source. Constraint replaces that entry's explicit constraint
+// when nonempty; otherwise the existing explicit constraint remains in force.
+// Callers can supply a caret constraint to limit an upgrade to a selected major.
+type Target struct {
+	Name, Source, Constraint string
+	Policy                   CandidatePolicy
+}
+
+// Node is the final pin and derived graph data. Requires is normalized, sorted,
+// unique, and always nonnil. Via contains immediate parents, sorted and unique.
+type Node struct {
+	Name, Source, Constraint string
+	Version, Commit          string
+	Requires                 []string
+	Direct                   bool
+	Via                      []string
+}
+
+// Diff compares all planned fields with the manifest, including snapshots and via.
+type Diff struct{ Added, Changed, Unchanged []Node }
+
+// Plan is deterministic: every node list and Orphans is ordered by skill name.
+// Existing orphaned transitive entries are retained and still constrain the graph.
+type Plan struct {
+	Nodes   []Node
+	Diff    Diff
+	Orphans []string
+}
+
+type planner struct {
+	scope        Scope
+	current      *manifest.Manifest
+	access       SourceAccess
+	seeds        map[string]*manifest.Skill
+	targets      map[string]Target
+	locked       map[string]Release
+	releases     map[string][]Release
+	requires     map[string][]string
+	accessErrors map[string]error
+	indexes      map[string]map[string]int
+	failed       map[string]error
+	active       map[string]bool
+}
+
+// BuildPlan plans one scope without writing managed state or mutating inputs.
+// All current entries participate, including orphans. Source access is lazy and
+// memoized per invocation; known snapshots on retained pins require no access.
+// Explicit targets are fixed to their policy's preferred candidate, never lowered
+// to work around dependency failures. An error always returns a nil plan.
+func BuildPlan(scope Scope, current *manifest.Manifest, targets []Target, access SourceAccess) (result *Plan, planErr error) {
+	defer func() {
+		if planErr != nil {
+			planErr = &PlanError{Err: planErr, ManagedStateUntouched: true}
+		}
+	}()
+	if current == nil {
+		return nil, &ValidationError{Location: "manifest", Err: fmt.Errorf("must not be nil")}
+	}
+	p := &planner{
+		scope: scope, current: current, access: access,
+		seeds: make(map[string]*manifest.Skill), targets: make(map[string]Target), locked: make(map[string]Release),
+		releases: make(map[string][]Release), requires: make(map[string][]string), failed: make(map[string]error), active: make(map[string]bool),
+		indexes:      make(map[string]map[string]int),
+		accessErrors: make(map[string]error),
+	}
+	if err := p.prepare(targets); err != nil {
+		return nil, err
+	}
+	selected, err := p.search(map[string]assignment{})
+	if err != nil {
+		return nil, err
+	}
+	nodes := make(map[string]Node, len(selected))
+	for name, selection := range selected {
+		nodes[name] = selection.Node
+	}
+	return p.plan(nodes), nil
+}
+
+func keys[V any](m map[string]V) []string { return slices.Sorted(maps.Keys(m)) }
+
+func (p *planner) validateName(alias, name string) error {
+	// Reuse the dependency reference validator, including its alias/path rules.
+	_, err := ParseRef(alias + "/" + name + "@0.0.0")
+	if err != nil {
+		return &ValidationError{Location: "manifest skill " + name, Err: err}
+	}
+	if _, ok := p.current.Sources[alias]; !ok {
+		return &UnknownSourceError{Scope: p.scope, Alias: alias}
+	}
+	return nil
+}
+
+func (p *planner) prepare(targets []Target) error {
+	for _, alias := range keys(p.current.Sources) {
+		if _, err := ParseRef(alias + "/source-check@0.0.0"); err != nil {
+			return &ValidationError{Location: "source alias " + alias, Err: err}
+		}
+	}
+	for _, name := range keys(p.current.Skills) {
+		s := p.current.Skills[name]
+		if s == nil {
+			return &ValidationError{Location: "manifest skill " + name, Err: fmt.Errorf("must not be nil")}
+		}
+		if err := p.validateName(s.Source, name); err != nil {
+			return err
+		}
+		if err := source.ValidateConstraint(s.Version); err != nil {
+			return &ValidationError{Location: "manifest skill " + name + " version", Err: err}
+		}
+		if s.Resolved != nil {
+			if s.Resolved.Commit == "" {
+				return &ValidationError{Location: "manifest skill " + name, Err: fmt.Errorf("pin has no commit")}
+			}
+			if s.Resolved.Version != "" {
+				if _, err := source.Satisfies("", s.Resolved.Version); err != nil {
+					return &ValidationError{Location: "manifest skill " + name, Err: err}
+				}
+			}
+			if s.Resolved.Requires != nil {
+				n := Node{Name: name, Source: s.Source, Version: s.Resolved.Version, Commit: s.Resolved.Commit}
+				if _, err := p.normalize(n, *s.Resolved.Requires); err != nil {
+					return err
+				}
+			}
+		}
+		copy := *s
+		p.seeds[name] = &copy
+	}
+	ordered := slices.Clone(targets)
+	slices.SortFunc(ordered, func(a, b Target) int { return strings.Compare(a.Name, b.Name) })
+	for _, t := range ordered {
+		if _, ok := p.targets[t.Name]; ok {
+			return &ValidationError{Location: "target " + t.Name, Err: fmt.Errorf("duplicate target")}
+		}
+		if t.Policy == "" {
+			t.Policy = Install
+		}
+		if t.Policy != Install && t.Policy != Upgrade {
+			return &ValidationError{Location: "target " + t.Name, Err: fmt.Errorf("unknown candidate policy %q", t.Policy)}
+		}
+		s, exists := p.seeds[t.Name]
+		if t.Source == "" {
+			if exists {
+				t.Source = s.Source
+			} else if len(p.current.Sources) == 1 {
+				t.Source = keys(p.current.Sources)[0]
+			}
+		}
+		if err := p.validateName(t.Source, t.Name); err != nil {
+			return err
+		}
+		if err := source.ValidateConstraint(t.Constraint); err != nil {
+			return &ValidationError{Location: "target " + t.Name, Err: err}
+		}
+		if exists && s.Source != t.Source {
+			return &ConflictError{Scope: p.scope, Name: t.Name, Sources: []string{s.Source, t.Source}, Reason: SourceCollision,
+				Requests: []Requirement{{Ref: Ref{Source: s.Source, Name: t.Name, Constraint: s.Version}, Requester: t.Name, Source: s.Source, Manifest: true, Index: -1}, {Ref: Ref{Source: t.Source, Name: t.Name, Constraint: t.Constraint}, Requester: t.Name, Source: t.Source, Target: true, Index: -1}}}
+		}
+		if !exists {
+			s = &manifest.Skill{Source: t.Source}
+			p.seeds[t.Name] = s
+		}
+		if t.Constraint != "" {
+			s.Version = t.Constraint
+		}
+		p.targets[t.Name] = t
+	}
+	return nil
+}
+
+// normalize uses Unit 1 parsing/grouping, preserving original indexes in errors.
+func (p *planner) normalize(n Node, raw []string) ([]string, error) {
+	refs := make([]Ref, 0, len(raw))
+	indexes := make(map[string]int)
+	for i, text := range raw {
+		r, err := ParseRef(text)
+		if err != nil {
+			return nil, &ValidationError{Location: fmt.Sprintf("%s metadata.requires[%d]", nodeRef(n), i), Err: err}
+		}
+		r = r.WithDefaultSource(n.Source)
+		if _, ok := p.current.Sources[r.Source]; !ok {
+			return nil, &UnknownSourceError{Scope: p.scope, Alias: r.Source, Requirement: incoming(n, r, i)}
+		}
+		refs = append(refs, r)
+		if _, ok := indexes[r.String()]; !ok {
+			indexes[r.String()] = i
+		}
+	}
+	out := make([]string, 0, len(refs))
+	for _, group := range GroupRefs(refs, n.Source) {
+		for _, r := range group {
+			out = append(out, r.String())
+		}
+	}
+	slices.Sort(out)
+	p.indexes[nodeRef(n)] = indexes
+	return out, nil
+}
+
+func nodeRef(n Node) string {
+	v := n.Version
+	if v == "" {
+		v = n.Commit
+	}
+	return n.Source + "/" + n.Name + "@" + v
+}
+
+func incoming(n Node, ref Ref, index int) Requirement {
+	return Requirement{Ref: ref, Requester: n.Name, Source: n.Source, Version: n.Version, Commit: n.Commit, Index: index}
+}
+
+func (p *planner) load(n Node) (Node, error) {
+	var raw []string
+	if s := p.current.Skills[n.Name]; s != nil && s.Source == n.Source && s.Resolved != nil && s.Resolved.Commit == n.Commit && s.Resolved.Requires != nil {
+		raw = *s.Resolved.Requires
+	} else {
+		key := n.Source + "/" + n.Name + "@" + n.Commit
+		if err := p.accessErrors["requires "+key]; err != nil {
+			return Node{}, err
+		}
+		var ok bool
+		raw, ok = p.requires[key]
+		if !ok {
+			if p.access == nil {
+				return Node{}, &AccessError{Source: n.Source, Name: n.Name, Commit: n.Commit, Operation: "read requirements", Err: fmt.Errorf("no source access configured")}
+			}
+			var err error
+			raw, err = p.access.Requires(n.Source, n.Name, n.Commit)
+			if err != nil {
+				failure := &AccessError{Source: n.Source, Name: n.Name, Commit: n.Commit, Operation: "read requirements", Err: err}
+				p.accessErrors["requires "+key] = failure
+				return Node{}, failure
+			}
+			p.requires[key] = slices.Clone(raw)
+		}
+	}
+	var err error
+	n.Requires, err = p.normalize(n, raw)
+	return n, err
+}
+
+func (p *planner) published(alias, name string) ([]Release, error) {
+	key := alias + "/" + name
+	if err := p.accessErrors["releases "+key]; err != nil {
+		return nil, err
+	}
+	if cached, ok := p.releases[key]; ok {
+		return cached, nil
+	}
+	if p.access == nil {
+		return nil, &AccessError{Source: alias, Name: name, Operation: "list releases", Err: fmt.Errorf("no source access configured")}
+	}
+	releases, err := p.access.Releases(alias, name)
+	if err != nil {
+		failure := &AccessError{Source: alias, Name: name, Operation: "list releases", Err: err}
+		p.accessErrors["releases "+key] = failure
+		return nil, failure
+	}
+	releases = slices.Clone(releases)
+	for _, r := range releases {
+		if _, err := source.Satisfies("", r.Version); err != nil || r.Commit == "" {
+			return nil, &ValidationError{Location: "release " + key, Err: fmt.Errorf("invalid release %+v", r)}
+		}
+	}
+	slices.SortFunc(releases, func(a, b Release) int {
+		if c := semver.Compare("v"+b.Version, "v"+a.Version); c != 0 {
+			return c
+		}
+		return strings.Compare(a.Commit, b.Commit)
+	})
+	p.releases[key] = slices.Compact(releases)
+	return p.releases[key], nil
+}
+
+func matches(version string, requests []Requirement) bool {
+	for _, r := range requests {
+		if r.Ref.Constraint == "" {
+			continue
+		}
+		if version == "" {
+			return false
+		}
+		ok, _ := source.Satisfies(r.Ref.Constraint, version)
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func constraints(requests []Requirement) []string {
+	out := make([]string, len(requests))
+	for i, r := range requests {
+		out[i] = r.Ref.Constraint
+	}
+	return out
+}
+
+func (p *planner) candidates(name string, d *demand) ([]Release, error) {
+	alias := keys(d.sources)[0]
+	s := p.seeds[name]
+	t, target := p.targets[name]
+	if target {
+		if r, ok := p.locked[name]; ok {
+			return []Release{r}, nil
+		}
+	}
+	var pin *manifest.Resolved
+	if s != nil {
+		pin = s.Resolved
+	}
+	requests := d.requests
+	if target {
+		// Explicit candidate policy is evaluated without dependent constraints.
+		requests = []Requirement{{Ref: Ref{Constraint: s.Version}}}
+	}
+	if pin != nil && (!target || (t.Policy == Install && t.Constraint == "")) && matches(pin.Version, requests) {
+		r := Release{Version: pin.Version, Commit: pin.Commit}
+		if target {
+			p.locked[name] = r
+		}
+		return []Release{r}, nil
+	}
+	overlap, _ := source.ConstraintsOverlap(constraints(requests))
+	if !overlap {
+		return nil, &ConflictError{Scope: p.scope, Name: name, Sources: []string{alias}, Requests: sortedRequests(d.requests), Reason: EmptyIntersection}
+	}
+	releases, err := p.published(alias, name)
+	if err != nil {
+		return nil, err
+	}
+	if len(releases) == 0 {
+		if s != nil && s.Version == "" && (target || s.IsDirect()) && len(d.requests) == 0 {
+			if tip, ok := p.access.(TipAccess); ok {
+				r, err := tip.Tip(alias, name)
+				if err != nil {
+					return nil, &AccessError{Source: alias, Name: name, Operation: "resolve branch tip", Err: err}
+				}
+				if r.Commit == "" || r.Version != "" {
+					return nil, &ValidationError{Location: "branch tip " + alias + "/" + name, Err: fmt.Errorf("expected an unversioned commit")}
+				}
+				if target {
+					p.locked[name] = r
+				}
+				return []Release{r}, nil
+			}
+		}
+		return nil, &NoReleasesError{Scope: p.scope, Source: alias, Name: name, Requests: sortedRequests(d.requests)}
+	}
+	var out []Release
+	for _, r := range releases {
+		if matches(r.Version, requests) {
+			out = append(out, r)
+		}
+	}
+	if len(out) == 0 {
+		return nil, &ConflictError{Scope: p.scope, Name: name, Sources: []string{alias}, Requests: sortedRequests(d.requests), Reason: NoMatchingRelease}
+	}
+	if target {
+		r := out[0]
+		if pin != nil && t.Policy == Upgrade && pin.Version != "" && semver.Compare("v"+r.Version, "v"+pin.Version) < 0 {
+			return nil, &UpgradeRefusalError{Source: alias, Name: name, From: pin.Version, To: r.Version, Operation: t.Policy, Blocking: sortedRequests(d.requests)}
+		}
+		p.locked[name] = r
+		return []Release{r}, nil
+	}
+	return out, nil
+}
