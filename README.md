@@ -77,6 +77,42 @@ kitt never overwrites a file it did not create. On a project that already has an
 
 A skill without any release is pinned to the latest commit of the default branch.
 
+## Skill dependencies
+
+Declare requirements in `SKILL.md` frontmatter:
+
+```yaml
+metadata:
+  version: "2.0.0"
+  requires:
+    - "code-review@^1.0.0"
+    - "public/security@^1"
+    - "adr@1.2.3"
+```
+
+Use `name@constraint` for the same source or `alias/name@constraint` for another source configured in `[sources]`. A constraint is mandatory: only exact `X.Y.Z` and caret `^X[.Y[.Z]]` are accepted. Caret means the same major at or above the floor, including major zero: `^0.2` accepts later `0.x` releases. Dependencies must have published releases; a branch-tip pin cannot satisfy a requirement.
+
+- `install <skill>` resolves its dependencies and reuses compatible pins; `install` restores the pinned set. Installing an existing transitive skill without a range marks it direct and keeps its pin.
+- `upgrade` checks the resulting dependency graph, including every dependent's range. There is one version per skill name per scope (project or user); conflicting ranges or sources fail with all requesters listed and apply nothing.
+- `list` shows a dependency tree, shared skills and direct installs. `doctor` checks dependency consistency offline and reports orphaned transitive skills. Orphans are kept; there is no remove command.
+- `release <skill>` validates every immediate requirement before creating a tag: syntax, known alias, a matching published release and the skill's presence at that release. Bare requirements use the selected release remote (`--remote`, default `origin`); qualified requirements use the skills repository root's `kitt.toml`, never the user manifest. Local-only tags do not count.
+
+In `kitt.toml`, `direct` defaults to `true`; transitive-only entries have `direct = false` and no generated `version` constraint. `via` lists sorted, unique immediate parent names, including for direct installs that are also dependencies. `resolved.requires` snapshots the pinned requirements with explicit aliases; `[]` means a known leaf, while an absent key means legacy/unknown metadata. Kitt maintains these keys:
+
+```toml
+[skills.code-review]
+source = "team"
+direct = false
+via = ["review"]
+[skills.code-review.resolved]
+version = "1.4.0"
+commit = "9f1c2e7a…"
+hash = "h1:Lr…"
+requires = []
+```
+
+**Manifests using `direct`, `via` or `resolved.requires` require kitt >= 0.2.0.** Older kitt rejects these as unknown keys; update teammates, CI and hook installations before sharing the manifest.
+
 ## `kitt.toml`
 
 ```toml

@@ -6,8 +6,22 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
+
+// Resolve relative filesystem remotes from the releasing repository, rather
+// than the process directory used by the source cache's clone command.
+func releaseRemoteURL(root, remote string) (string, error) {
+	url, err := gitTrim(root, "remote", "get-url", "--", remote)
+	if err != nil {
+		return "", err
+	}
+	if !filepath.IsAbs(url) && !strings.Contains(url, ":") {
+		url = filepath.Join(root, url)
+	}
+	return url, nil
+}
 
 // runGit runs `git -C root` with args.
 // The environment has no GIT_DIR, GIT_WORK_TREE, or GIT_INDEX_FILE, and GIT_TERMINAL_PROMPT=0.

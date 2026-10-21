@@ -11,7 +11,10 @@ import (
 
 	"golang.org/x/mod/semver"
 
+	"github.com/anthony-cordani/kitt/internal/dependency"
+	"github.com/anthony-cordani/kitt/internal/manifest"
 	"github.com/anthony-cordani/kitt/internal/skill"
+	"github.com/anthony-cordani/kitt/internal/source"
 )
 
 // Options configures a release.
@@ -93,6 +96,9 @@ func Release(opts Options, name string) error {
 			return fmt.Errorf("version %s is not greater than the last release %s: bump metadata.version in skills/%s/SKILL.md", meta.Version, last, name)
 		}
 	}
+	if err := validateRequirements(root, opts.Remote, meta); err != nil {
+		return &requirementError{err}
+	}
 	tag := name + "/v" + meta.Version
 	if _, err := runGit(root, "tag", "-a", "-m", name+" "+meta.Version, tag); err != nil {
 		return err
@@ -106,6 +112,81 @@ func Release(opts Options, name string) error {
 		out = io.Discard
 	}
 	fmt.Fprintf(out, "released %s %s (%s)\n", name, meta.Version, tag)
+	return nil
+}
+
+// requirementError leaves the command prefix to the CLI, as other release
+// errors do, while preserving structured dependency errors for callers.
+type requirementError struct{ error }
+
+func (e *requirementError) Error() string {
+	return strings.TrimPrefix(e.error.Error(), "kitt release: ") + "\n  no release tag created"
+}
+
+func (e *requirementError) Unwrap() error { return e.error }
+
+func validateRequirements(root, remote string, meta skill.Meta) error {
+	path := filepath.Join(root, manifest.FileName)
+	scope := dependency.Scope{Command: "release", ManifestPath: path}
+	var sameSource, qualified *dependency.GitSources
+	var aliases map[string]string
+	for i, text := range meta.Requires {
+		ref, err := dependency.ParseRef(text)
+		if err != nil {
+			return &dependency.ValidationError{
+				Location: fmt.Sprintf("%s/%s@%s metadata.requires[%d] in %s (project scope)", remote, meta.Name, meta.Version, i, filepath.Join(root, "skills", meta.Name, "SKILL.md")),
+				Err:      err,
+			}
+		}
+		bare := ref.Source == ""
+		ref = ref.WithDefaultSource(remote)
+		request := dependency.Requirement{Ref: ref, Requester: meta.Name, Source: remote, Version: meta.Version, Index: i}
+		access := sameSource
+		if bare {
+			if sameSource == nil {
+				url, err := releaseRemoteURL(root, remote)
+				if err != nil {
+					return fmt.Errorf("%s/%s@%s requires %q: %w", remote, meta.Name, meta.Version, text, err)
+				}
+				sameSource = dependency.NewGitSources(map[string]string{remote: url})
+			}
+			access = sameSource
+		} else {
+			if qualified == nil {
+				m, err := manifest.Load(path)
+				if err != nil && !errors.Is(err, fs.ErrNotExist) {
+					return fmt.Errorf("%s/%s@%s requires %q in project scope: %w", remote, meta.Name, meta.Version, text, err)
+				}
+				aliases = map[string]string{}
+				if m != nil {
+					aliases = m.Sources
+				}
+				qualified = dependency.NewGitSources(aliases)
+			}
+			if _, ok := aliases[ref.Source]; !ok {
+				return &dependency.UnknownSourceError{Scope: scope, Alias: ref.Source, Requirement: request}
+			}
+			access = qualified
+		}
+		releases, err := access.Releases(ref.Source, ref.Name)
+		if err != nil {
+			return fmt.Errorf("%s/%s@%s requires %q in project scope: %w", remote, meta.Name, meta.Version, ref.String(), &dependency.AccessError{Source: ref.Source, Name: ref.Name, Operation: "list published releases", Err: err})
+		}
+		if len(releases) == 0 {
+			return &dependency.NoReleasesError{Scope: scope, Source: ref.Source, Name: ref.Name, Requests: []dependency.Requirement{request}}
+		}
+		matched := false
+		for _, release := range releases {
+			ok, err := source.Satisfies(ref.Constraint, release.Version)
+			if err != nil {
+				return err
+			}
+			matched = matched || ok
+		}
+		if !matched {
+			return &dependency.ConflictError{Scope: scope, Name: ref.Name, Sources: []string{ref.Source}, Requests: []dependency.Requirement{request}, Reason: dependency.NoMatchingRelease}
+		}
+	}
 	return nil
 }
 
