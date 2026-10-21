@@ -44,17 +44,12 @@ func ParseFile(path string) (Meta, error) {
 	if err != nil {
 		return Meta{}, err
 	}
-	for key, node := range doc.Metadata {
-		if key == "requires" {
-			continue
-		}
+	if node, ok := doc.Metadata["version"]; ok {
 		var value string
 		if err := node.Decode(&value); err != nil {
-			return Meta{}, fmt.Errorf("parse skill frontmatter: %w", err)
+			return Meta{}, fmt.Errorf("parse skill frontmatter %q: metadata.version at line %d: must be a string", path, node.Line+1)
 		}
-		if key == "version" {
-			meta.Version = value
-		}
+		meta.Version = value
 	}
 	return meta, nil
 }
@@ -68,7 +63,7 @@ func parseRequirements(path string, node yaml.Node) ([]string, error) {
 		node = *node.Alias
 	}
 	if node.Kind != yaml.SequenceNode {
-		return nil, fmt.Errorf("parse skill frontmatter %q: metadata.requires[0] at line %d: must be a sequence of strings", path, line)
+		return nil, fmt.Errorf("parse skill frontmatter %q: metadata.requires at line %d: must be a sequence of strings", path, line)
 	}
 	requires := make([]string, len(node.Content))
 	for i, item := range node.Content {

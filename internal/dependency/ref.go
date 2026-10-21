@@ -3,12 +3,15 @@ package dependency
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"unicode"
 
 	"github.com/anthony-cordani/kitt/internal/skill"
 	"github.com/anthony-cordani/kitt/internal/source"
 )
+
+var sourceAliasPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
 // Ref identifies a skill requirement, optionally qualified by a source alias.
 type Ref struct {
@@ -55,7 +58,7 @@ func parseName(s string) (Ref, error) {
 		if alias == "" {
 			return Ref{}, fmt.Errorf("source alias must not be empty")
 		}
-		if alias == "." || alias == ".." || alias == "~" || strings.ContainsAny(alias, ":=") {
+		if !sourceAliasPattern.MatchString(alias) {
 			return Ref{}, fmt.Errorf("invalid source alias %q: must be a source alias, not a path or alias=url", alias)
 		}
 		ref.Source, ref.Name = alias, name

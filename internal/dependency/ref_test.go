@@ -22,6 +22,8 @@ func TestParseRef(t *testing.T) {
 		{in: "other-source/a1@0.0.0", want: dependency.Ref{Source: "other-source", Name: "a1", Constraint: "0.0.0"}},
 		{in: "Team_1/review@^1", want: dependency.Ref{Source: "Team_1", Name: "review", Constraint: "^1"}},
 		{in: "team.skills/review@^1", want: dependency.Ref{Source: "team.skills", Name: "review", Constraint: "^1"}},
+		{in: "nexus-skills/review@^1", want: dependency.Ref{Source: "nexus-skills", Name: "review", Constraint: "^1"}},
+		{in: "a.b_c/review@^1", want: dependency.Ref{Source: "a.b_c", Name: "review", Constraint: "^1"}},
 		{in: strings.Repeat("a", 64) + "@^0", want: dependency.Ref{Name: strings.Repeat("a", 64), Constraint: "^0"}},
 	}
 	for _, tt := range tests {
@@ -56,6 +58,11 @@ func TestParseRefRejectsInvalidInput(t *testing.T) {
 		{in: "./review@^1", errSub: `invalid source alias "."`},
 		{in: "../review@^1", errSub: `invalid source alias ".."`},
 		{in: "~/review@^1", errSub: `invalid source alias "~"`},
+		{in: "~alice/review@^1", errSub: `invalid source alias "~alice"`},
+		{in: "$VAR/review@^1", errSub: `invalid source alias "$VAR"`},
+		{in: "%x/review@^1", errSub: `invalid source alias "%x"`},
+		{in: "-team/review@^1", errSub: `invalid source alias "-team"`},
+		{in: ".hidden/review@^1", errSub: `invalid source alias ".hidden"`},
 		{in: "C:/review@^1", errSub: `invalid source alias "C:"`},
 		{in: "team=url/review@^1", errSub: `invalid source alias "team=url"`},
 		{in: "..", errSub: "missing @constraint"},

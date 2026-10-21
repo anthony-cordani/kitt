@@ -25,6 +25,7 @@ func TestParseFileRequirements(t *testing.T) {
 		{name: "flow", metadata: "metadata:\n  requires: [\"code-review@^1.2\", \"other/us-review@^0.2.3\"]\n", want: []string{"code-review@^1.2", "other/us-review@^0.2.3"}},
 		{name: "raw_strings", metadata: "metadata:\n  requires: [\"\", \"not a valid ref\", \"123\", \"true\", \"null\"]\n", want: []string{"", "not a valid ref", "123", "true", "null"}},
 		{name: "other_scalar_metadata", metadata: "metadata:\n  version: 1.2\n  enabled: true\n  count: 2\n", version: "1.2"},
+		{name: "other_complex_metadata", metadata: "metadata:\n  tags: [ai, review]\n  author: {name: Ada}\n"},
 		{name: "aliases", metadata: "metadata:\n  first: &ref code-review@^1\n  requires: &refs [*ref]\n", want: []string{"code-review@^1"}},
 		{name: "sequence_alias", metadata: "requirements: &refs [code-review@^1]\nmetadata:\n  requires: *refs\n", want: []string{"code-review@^1"}},
 	}
@@ -38,6 +39,21 @@ func TestParseFileRequirements(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestParseFileRejectsNonStringVersion(t *testing.T) {
+	for _, ending := range []string{"\n", "\r\n"} {
+		t.Run(fmt.Sprintf("%q", ending), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "SKILL.md")
+			doc := "---\nname: review\ndescription: Read carefully.\nmetadata:\n  version: [1, 2]\n---\n"
+			testutil.WriteFile(t, path, strings.ReplaceAll(doc, "\n", ending))
+			_, err := skill.ParseFile(path)
+			want := fmt.Sprintf("parse skill frontmatter %q: metadata.version at line 5: must be a string", path)
+			if err == nil || err.Error() != want {
+				t.Fatalf("ParseFile error = %v, want %q", err, want)
+			}
+		})
 	}
 }
 
@@ -68,7 +84,12 @@ func TestParseFileRejectsMalformedRequirements(t *testing.T) {
 				doc := "---\nname: review\ndescription: Read carefully.\nmetadata:\n  requires: " + tt.value + "\n---\n"
 				testutil.WriteFile(t, path, strings.ReplaceAll(doc, "\n", ending))
 				_, err := skill.ParseFile(path)
-				want := fmt.Sprintf("parse skill frontmatter %q: metadata.requires[%d] at line %d: must be a %s", path, tt.index, tt.line, tt.kind)
+				want := fmt.Sprintf("parse skill frontmatter %q: metadata.requires", path)
+				if tt.kind == "sequence of strings" {
+					want += fmt.Sprintf(" at line %d: must be a sequence of strings", tt.line)
+				} else {
+					want = fmt.Sprintf("parse skill frontmatter %q: metadata.requires[%d] at line %d: must be a string", path, tt.index, tt.line)
+				}
 				if err == nil || err.Error() != want {
 					t.Fatalf("ParseFile error = %v, want %q", err, want)
 				}
