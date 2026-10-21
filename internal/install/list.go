@@ -159,14 +159,7 @@ func writeDependencyTree(out io.Writer, skillsDir string, m *manifest.Manifest, 
 			write(name, "  ", "", "")
 		}
 	}
-	incomplete := false
-	for _, name := range names {
-		if !known[name] && !slices.Contains(graph.Orphans, name) {
-			incomplete = true
-			break
-		}
-	}
-	if incomplete {
+	if listReachabilityIncomplete(names, m, known, graph.Orphans) {
 		fmt.Fprintln(out, "Dependency information incomplete; transitive reachability is unknown:")
 	} else if len(graph.Orphans) > 0 {
 		fmt.Fprintln(out, "Orphaned transitive skills:")
@@ -185,6 +178,38 @@ func writeDependencyTree(out io.Writer, skillsDir string, m *manifest.Manifest, 
 		}
 	}
 	return nil
+}
+
+// listReachabilityIncomplete is true only when the orphan section would list
+// at least one transitive skill whose reachability cannot be decided.
+// Unresolved entries and direct roots are not evidence either way.
+func listReachabilityIncomplete(names []string, m *manifest.Manifest, known map[string]bool, orphans []string) bool {
+	if len(orphans) == 0 {
+		return false
+	}
+	orphan := make(map[string]bool, len(orphans))
+	for _, name := range orphans {
+		orphan[name] = true
+	}
+	for _, name := range names {
+		s := m.Skills[name]
+		if s == nil || s.Resolved == nil || s.IsDirect() {
+			continue
+		}
+		if !known[name] && !orphan[name] {
+			return true
+		}
+		if !orphan[name] {
+			continue
+		}
+		for _, parent := range s.Via {
+			parentSkill := m.Skills[parent]
+			if parentSkill != nil && parentSkill.Resolved != nil && !known[parent] {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // diagnosticRequirements shares reference normalization between list and doctor.

@@ -1,6 +1,7 @@
 package install
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"github.com/anthony-cordani/kitt/internal/dependency"
@@ -8,6 +9,7 @@ import (
 	"github.com/anthony-cordani/kitt/internal/source"
 	"github.com/anthony-cordani/kitt/internal/templates"
 	"github.com/anthony-cordani/kitt/internal/testutil"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -44,31 +46,48 @@ func TestInstallDestinationPreflight(t *testing.T) {
 
 func TestStagingInsideSkillsAndSweepsOnlyOlderPlans(t *testing.T) {
 	dir := t.TempDir()
-	old := filepath.Join(dir, tempPrefix+"plan-old")
-	fresh := filepath.Join(dir, tempPrefix+"plan-fresh")
-	backup := filepath.Join(dir, tempPrefix+"backup-recover")
-	for _, path := range []string{old, fresh, backup} {
+	oldPlan := filepath.Join(dir, tempPrefix+"plan-old")
+	freshPlan := filepath.Join(dir, tempPrefix+"plan-fresh")
+	oldBackup := filepath.Join(dir, tempPrefix+"backup-old")
+	freshBackup := filepath.Join(dir, tempPrefix+"backup-fresh")
+	for _, path := range []string{oldPlan, freshPlan, oldBackup, freshBackup} {
 		if err := os.Mkdir(path, 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
 	started := time.Now()
-	if err := os.Chtimes(old, started.Add(-time.Hour), started.Add(-time.Hour)); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chtimes(fresh, started.Add(time.Hour), started.Add(time.Hour)); err != nil {
-		t.Fatal(err)
+	abandoned := started.Add(-(abandonedStagingAge + time.Hour))
+	for _, path := range []string{oldPlan, oldBackup} {
+		if err := os.Chtimes(path, abandoned, abandoned); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := sweepStaging(dir, started); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(old); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("old staging: %v", err)
-	}
-	for _, path := range []string{fresh, backup} {
-		if _, err := os.Stat(path); err != nil {
-			t.Fatal(err)
+	for _, path := range []string{oldPlan, oldBackup} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s still exists: %v", path, err)
 		}
+	}
+	for _, path := range []string{freshPlan, freshBackup} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("current staging must survive: %s: %v", path, err)
+		}
+	}
+}
+
+func TestSweepIgnoresUnreadableDir(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(dir, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stderr := captureStderr(t)
+	if err := sweepStaging(dir, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr(), "warning:") {
+		t.Fatalf("stderr = %q", stderr())
 	}
 }
 
@@ -422,4 +441,84 @@ func TestJunctionBackupRollbackAndCleanupPreserveTarget(t *testing.T) {
 	if data, err := os.ReadFile(filepath.Join(target, "content")); err != nil || string(data) != "must survive" {
 		t.Fatalf("cleanup changed target: %s, %v", data, err)
 	}
+}
+
+func TestBackupRemovalFailureStillReportsSuccess(t *testing.T) {
+	p, opts, repo := transactionFixture(t, false)
+	transactionRelease(t, repo, "foo", "1.0.0")
+	var locked string
+	applyTestHook = func(step, path string) error {
+		if step != "manifest" {
+			return nil
+		}
+		matches, err := filepath.Glob(filepath.Join(p.skillsDir, tempPrefix+"backup-*"))
+		if err != nil {
+			return err
+		}
+		if len(matches) != 1 {
+			return fmt.Errorf("backup dirs = %v", matches)
+		}
+		locked = filepath.Join(matches[0], "locked")
+		if err := os.Mkdir(locked, 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(locked, "keep"), []byte("x"), 0o644); err != nil {
+			return err
+		}
+		if err := os.Chmod(locked, 0); err != nil {
+			return err
+		}
+		return nil
+	}
+	t.Cleanup(func() {
+		applyTestHook = nil
+		if locked != "" {
+			_ = os.Chmod(locked, 0o755)
+		}
+	})
+	stderr := captureStderr(t)
+	var stdout bytes.Buffer
+	opts.Out = &stdout
+	if err := Add(opts, "foo"); err != nil {
+		t.Fatalf("install: %v\nstderr: %s", err, stderr())
+	}
+	if !strings.Contains(stdout.String(), "added foo 1.0.0") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+	if got := stderr(); !strings.Contains(got, "warning:") || !strings.Contains(got, filepath.Join(p.skillsDir, tempPrefix+"backup-")) {
+		t.Fatalf("stderr = %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(p.skillsDir, "foo", "SKILL.md")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func captureStderr(t *testing.T) func() string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stderr
+	os.Stderr = w
+	var buf bytes.Buffer
+	done := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(&buf, r)
+		close(done)
+	}()
+	stopped := false
+	stop := func() string {
+		t.Helper()
+		if !stopped {
+			stopped = true
+			os.Stderr = old
+			_ = w.Close()
+			<-done
+			_ = r.Close()
+		}
+		return buf.String()
+	}
+	t.Cleanup(func() { _ = stop() })
+	return stop
 }

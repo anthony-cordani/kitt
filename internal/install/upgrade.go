@@ -103,7 +103,7 @@ func Upgrade(opts Options, name string, major bool) (err error) {
 		return err
 	}
 	out := outputOf(opts.Out)
-	_, err = stageAndApplyPlan(p, m, plan, access, false, out)
+	_, err = stageAndApplyPlan(p, m, plan, access, false, nil, out)
 	if err != nil {
 		return err
 	}

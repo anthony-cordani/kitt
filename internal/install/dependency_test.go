@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -630,5 +631,224 @@ func TestUpgradeRejectsUnrelatedStalePin(t *testing.T) {
 	}
 	if got := loadManifest(t, f.path).Skills["stale"].Resolved.Version; got != "2.0.0" {
 		t.Fatalf("explicit target pin: %s", got)
+	}
+}
+
+func TestSymlinkedClaudeSkillsDirPreservesSkillContent(t *testing.T) {
+	for _, global := range []bool{false, true} {
+		t.Run(fmt.Sprintf("global=%t", global), func(t *testing.T) {
+			f := dependencyScope(t, global)
+			dependencyRelease(t, f.repo, "foo", "1.0.0")
+			dependencyRelease(t, f.repo, "other", "1.0.0")
+			f.add(t, "foo")
+			foo := readText(t, filepath.Join(skillPath(f.root, "foo"), "SKILL.md"))
+			replaceClaudeSkillsWithLink(t, f.root)
+			f.restore(t)
+			assertSkillKept(t, f.root, "foo", foo)
+			f.add(t, "other")
+			assertSkillKept(t, f.root, "foo", foo)
+			other := readText(t, filepath.Join(skillPath(f.root, "other"), "SKILL.md"))
+			dependencyRelease(t, f.repo, "foo", "1.1.0")
+			f.upgrade(t, "", false)
+			upgraded := readText(t, filepath.Join(skillPath(f.root, "foo"), "SKILL.md"))
+			if !strings.Contains(upgraded, "1.1.0") {
+				t.Fatalf("foo was not upgraded:\n%s", upgraded)
+			}
+			assertSkillKept(t, f.root, "other", other)
+			parent := filepath.Join(f.root, ".claude", "skills")
+			if got, err := os.Readlink(parent); err != nil || got != "../.agents/skills" {
+				t.Fatalf("skills parent link = %q, %v", got, err)
+			}
+		})
+	}
+}
+
+func TestCorrectManagedLinkIsNotRecreated(t *testing.T) {
+	for _, global := range []bool{false, true} {
+		t.Run(fmt.Sprintf("global=%t", global), func(t *testing.T) {
+			f := dependencyScope(t, global)
+			dependencyRelease(t, f.repo, "foo", "1.0.0")
+			dependencyRelease(t, f.repo, "other", "1.0.0")
+			f.add(t, "foo")
+			link := claudePath(f.root, "foo")
+			before, err := os.Lstat(link)
+			if err != nil {
+				t.Fatal(err)
+			}
+			target, err := os.Readlink(link)
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.add(t, "other")
+			assertLinkUntouched(t, link, before, target)
+			f.restore(t)
+			assertLinkUntouched(t, link, before, target)
+			dependencyRelease(t, f.repo, "foo", "1.1.0")
+			f.upgrade(t, "", false)
+			assertLinkUntouched(t, link, before, target)
+		})
+	}
+}
+
+func TestInstallRepairsRequestedSkillWhenTreeIsMissingOrModified(t *testing.T) {
+	for _, missing := range []bool{false, true} {
+		for _, ref := range []string{"foo", "foo@^2"} {
+			t.Run(fmt.Sprintf("missing=%t/%s", missing, ref), func(t *testing.T) {
+				f := dependencyScope(t, false)
+				dependencyRelease(t, f.repo, "foo", "2.0.0")
+				dependencyRelease(t, f.repo, "notes", "1.0.0")
+				f.add(t, "foo")
+				f.add(t, "notes")
+				pinned := loadManifest(t, f.path).Skills["foo"].Resolved.Hash
+				notes := filepath.Join(skillPath(f.root, "notes"), "SKILL.md")
+				testutil.WriteFile(t, notes, "local notes\n")
+				foo := skillPath(f.root, "foo")
+				if missing {
+					if err := os.RemoveAll(foo); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					testutil.WriteFile(t, filepath.Join(foo, "SKILL.md"), "edited\n")
+				}
+				f.add(t, ref)
+				sum, err := skill.Hash(foo)
+				if err != nil || sum != pinned {
+					t.Fatalf("restored hash = %s, err %v, want %s", sum, err, pinned)
+				}
+				assertLinkResolves(t, claudePath(f.root, "foo"), foo)
+				if got := readText(t, notes); got != "local notes\n" {
+					t.Fatalf("unrelated skill changed: %q", got)
+				}
+			})
+		}
+	}
+}
+
+func TestLegacyVerifiedParentProtectsSharedDependency(t *testing.T) {
+	f := dependencyScope(t, false)
+	dependencyRelease(t, f.repo, "leaf", "1.0.0")
+	dependencyRelease(t, f.repo, "a", "1.0.0", "leaf@^1")
+	f.add(t, "a")
+	m := loadManifest(t, f.path)
+	m.Skills["a"].Resolved.Requires = nil
+	f.save(t, m)
+	dependencyRelease(t, f.repo, "leaf", "2.0.0")
+	before := f.snapshot(t)
+	err := install.Add(f.opts, "leaf@^2")
+	assertUntouchedError(t, err, "cannot install demo/leaf")
+	if !strings.Contains(err.Error(), "demo/a@1.0.0 requires ^1") {
+		t.Fatalf("missing requester: %v", err)
+	}
+	assertSameTree(t, before, f.snapshot(t))
+}
+
+func TestLegacyVerifiedParentKeepsDependencyOnUnrelatedInstall(t *testing.T) {
+	f := dependencyScope(t, false)
+	dependencyRelease(t, f.repo, "leaf", "1.0.0")
+	dependencyRelease(t, f.repo, "a", "1.0.0", "leaf@^1")
+	f.add(t, "a")
+	m := loadManifest(t, f.path)
+	m.Skills["a"].Resolved.Requires = nil
+	otherRepo := testutil.NewRepo(t)
+	dependencyRelease(t, otherRepo, "other", "1.0.0")
+	m.Sources["other"] = testutil.URL(otherRepo)
+	f.save(t, m)
+	var out strings.Builder
+	f.opts.Out = &out
+	f.add(t, "other/other")
+	if strings.Contains(out.String(), "orphaned") {
+		t.Fatalf("output rewrote the graph:\n%s", out.String())
+	}
+	leaf := loadManifest(t, f.path).Skills["leaf"]
+	if leaf.IsDirect() || !slices.Equal(leaf.Via, []string{"a"}) || leaf.Resolved.Version != "1.0.0" {
+		t.Fatalf("leaf = %+v resolved %+v", leaf, leaf.Resolved)
+	}
+}
+
+func TestUnknownLegacyRequirementsDoNotRewriteViaOrOrphan(t *testing.T) {
+	for _, missing := range []bool{false, true} {
+		t.Run(fmt.Sprintf("missing=%t", missing), func(t *testing.T) {
+			f := dependencyScope(t, false)
+			dependencyRelease(t, f.repo, "leaf", "1.0.0")
+			dependencyRelease(t, f.repo, "a", "1.0.0", "leaf@^1")
+			f.add(t, "a")
+			m := loadManifest(t, f.path)
+			m.Skills["a"].Resolved.Requires = nil
+			if missing {
+				if err := os.RemoveAll(skillPath(f.root, "a")); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				testutil.WriteFile(t, filepath.Join(skillPath(f.root, "a"), "SKILL.md"), "local edit\n")
+			}
+			otherRepo := testutil.NewRepo(t)
+			dependencyRelease(t, otherRepo, "other", "1.0.0")
+			m.Sources["other"] = testutil.URL(otherRepo)
+			f.save(t, m)
+			removeSourceAndCache(t, f.repo)
+			var out strings.Builder
+			f.opts.Out = &out
+			f.add(t, "other/other")
+			if strings.Contains(out.String(), "orphaned") {
+				t.Fatalf("unknown requirements orphaned a skill:\n%s", out.String())
+			}
+			got := loadManifest(t, f.path)
+			leaf := got.Skills["leaf"]
+			if leaf.IsDirect() || !slices.Equal(leaf.Via, []string{"a"}) || got.Skills["a"].Resolved.Requires != nil {
+				t.Fatalf("leaf = %+v, a.requires = %v", leaf, got.Skills["a"].Resolved.Requires)
+			}
+			if missing {
+				assertMissing(t, skillPath(f.root, "a"))
+			} else if text := readText(t, filepath.Join(skillPath(f.root, "a"), "SKILL.md")); text != "local edit\n" {
+				t.Fatalf("modified skill restored: %q", text)
+			}
+		})
+	}
+}
+
+func replaceClaudeSkillsWithLink(t *testing.T, root string) {
+	t.Helper()
+	dir := filepath.Join(root, ".claude", "skills")
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../.agents/skills", dir); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skip("directory symlink requires Windows privilege")
+		}
+		t.Fatal(err)
+	}
+}
+
+func assertSkillKept(t *testing.T, root, name, want string) {
+	t.Helper()
+	for _, dir := range []string{skillPath(root, name), claudePath(root, name)} {
+		info, err := os.Lstat(dir)
+		if err != nil {
+			t.Fatalf("lstat %s: %v", dir, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			if _, err := os.Stat(dir); err != nil {
+				t.Fatalf("%s is a self-referencing link: %v", dir, err)
+			}
+		}
+	}
+	if got := readText(t, filepath.Join(skillPath(root, name), "SKILL.md")); got != want {
+		t.Fatalf("%s content = %q, want %q", name, got, want)
+	}
+}
+
+func assertLinkUntouched(t *testing.T, path string, before os.FileInfo, target string) {
+	t.Helper()
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.Readlink(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, info) || got != target {
+		t.Fatalf("%s was recreated (same=%v, target %q, want %q)", path, os.SameFile(before, info), got, target)
 	}
 }

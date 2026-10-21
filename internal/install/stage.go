@@ -23,7 +23,7 @@ import (
 type stagedSkill struct{ dir, hash string }
 
 // Staging and backups stay inside skillsDir, on the destination volume.
-func stagePlan(p paths, m *manifest.Manifest, plan *dependency.Plan, access *installSources, repair bool) (staged map[string]stagedSkill, cleanup func(), err error) {
+func stagePlan(p paths, m *manifest.Manifest, plan *dependency.Plan, access *installSources, repair bool, verify map[string]bool) (staged map[string]stagedSkill, cleanup func(), err error) {
 	root := ""
 	var created []string
 	cleanup = func() {
@@ -63,7 +63,9 @@ func stagePlan(p paths, m *manifest.Manifest, plan *dependency.Plan, access *ins
 		if old := m.Skills[n.Name]; old != nil && old.Source == n.Source && old.Resolved != nil && old.Resolved.Commit == n.Commit {
 			expected = old.Resolved.Hash
 		}
-		if !repair && expected != "" {
+		// A named install always checks its target, as main's Add reinstalled it.
+		// Every other pin that keeps its commit stays as it is.
+		if !repair && expected != "" && !verify[n.Name] {
 			staged[n.Name] = stagedSkill{hash: expected}
 			continue
 		}
@@ -265,28 +267,38 @@ func applyStep(step, path string) error {
 	return nil
 }
 
-// Only abandoned staging trees are swept. Backups are retained on rollback
-// failure and must never be swept automatically.
+// Staging trees and backups older than this belong to an abandoned run.
+// Anything newer may be a concurrent install and is left alone.
+const abandonedStagingAge = 24 * time.Hour
+
+// sweepStaging removes abandoned .kitt-tmp-plan-* and .kitt-tmp-backup-*
+// directories. Failures are warnings: a locked leftover must not abort install.
 func sweepStaging(dir string, started time.Time) error {
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
-		return err
+		fmt.Fprintf(os.Stderr, "warning: could not sweep staging in %s: %v\n", dir, err)
+		return nil
 	}
+	cutoff := started.Add(-abandonedStagingAge)
 	for _, entry := range entries {
-		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), tempPrefix+"plan-") {
+		name := entry.Name()
+		if !entry.IsDir() || (!strings.HasPrefix(name, tempPrefix+"plan-") && !strings.HasPrefix(name, tempPrefix+"backup-")) {
 			continue
 		}
 		info, err := entry.Info()
+		path := filepath.Join(dir, name)
 		if err != nil {
-			return err
+			fmt.Fprintf(os.Stderr, "warning: could not sweep staging in %s: %v\n", path, err)
+			continue
 		}
-		if info.ModTime().Before(started) {
-			if err := os.RemoveAll(filepath.Join(dir, entry.Name())); err != nil {
-				return err
-			}
+		if !info.ModTime().Before(cutoff) {
+			continue
+		}
+		if err := os.RemoveAll(path); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not remove %s: %v\n", path, err)
 		}
 	}
 	return nil

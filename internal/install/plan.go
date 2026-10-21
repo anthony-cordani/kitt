@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -27,6 +28,7 @@ type installSources struct {
 	paths    paths
 	targets  map[string]bool
 	legacy   map[string]bool
+	unknown  map[string]bool // legacy pins outside the request whose tree cannot be read
 	fetched  map[string]bool
 	releases map[string][]dependency.Release
 }
@@ -193,8 +195,13 @@ func planAndInstall(opts Options, ref *string) (err error) {
 	if err != nil {
 		return err
 	}
+	preserveUnknownRequirementPins(m, plan, access.unknown)
 	out := outputOf(opts.Out)
-	staged, err := stageAndApplyPlan(p, m, plan, access, ref == nil, out)
+	var verify map[string]bool
+	if len(targets) > 0 {
+		verify = map[string]bool{targets[0].Name: true}
+	}
+	staged, err := stageAndApplyPlan(p, m, plan, access, ref == nil, verify, out)
 	if err != nil {
 		return err
 	}
@@ -241,7 +248,7 @@ func prepareOwnership(p *paths, m *manifest.Manifest) error {
 
 // stageAndApplyPlan is the shared install/restore/upgrade application path.
 // Application starts only after every graph and staging check succeeds.
-func stageAndApplyPlan(p paths, m *manifest.Manifest, plan *dependency.Plan, access *installSources, prune bool, out io.Writer) (staged map[string]stagedSkill, err error) {
+func stageAndApplyPlan(p paths, m *manifest.Manifest, plan *dependency.Plan, access *installSources, prune bool, verify map[string]bool, out io.Writer) (staged map[string]stagedSkill, err error) {
 	validating := true
 	defer func() {
 		if err != nil && validating {
@@ -251,15 +258,14 @@ func stageAndApplyPlan(p paths, m *manifest.Manifest, plan *dependency.Plan, acc
 	if err := preflightInstall(p, plan); err != nil {
 		return nil, err
 	}
-	if err := sweepStaging(p.skillsDir, time.Now()); err != nil {
-		return nil, err
-	}
-	staged, cleanup, err := stagePlan(p, m, plan, access, prune)
+	// Sweep failures are warnings and must not abort the run.
+	_ = sweepStaging(p.skillsDir, time.Now())
+	staged, cleanup, err := stagePlan(p, m, plan, access, prune, verify)
 	if err != nil {
 		return nil, err
 	}
 	defer cleanup()
-	next := plannedManifest(m, plan, staged)
+	next := plannedManifest(m, plan, staged, access.unknown)
 	tx, err := newApplyTransaction(p)
 	if err != nil {
 		return nil, err
@@ -310,13 +316,13 @@ func stageAndApplyPlan(p paths, m *manifest.Manifest, plan *dependency.Plan, acc
 		}
 	}
 	committed = true
-	if err = removeTree(tx.root); err != nil {
-		// The installed state is committed; partially deleted backups cannot
-		// safely be rolled back.
-		return staged, fmt.Errorf("installation committed; remove backup directory %s manually: %w", tx.root, err)
+	if removeErr := removeTree(tx.root); removeErr != nil {
+		// The install is committed. A locked backup must not hide the report
+		// or fail the command; rollback is no longer possible.
+		fmt.Fprintf(os.Stderr, "warning: installation committed; remove backup directory %s manually: %v\n", tx.root, removeErr)
 	}
-	_, _ = io.Copy(out, &report)
-	return staged, nil
+	_, err = io.Copy(out, &report)
+	return staged, err
 }
 
 func installTarget(m *manifest.Manifest, p paths, text string) (dependency.Target, error) {
@@ -362,6 +368,7 @@ func installTarget(m *manifest.Manifest, p paths, text string) (dependency.Targe
 func planningManifest(p paths, m *manifest.Manifest, access *installSources, targets ...dependency.Target) (*manifest.Manifest, error) {
 	access.targets = map[string]bool{}
 	access.legacy = map[string]bool{}
+	access.unknown = map[string]bool{}
 	for _, target := range targets {
 		access.targets[target.Name] = true
 	}
@@ -391,8 +398,20 @@ func planningManifest(p paths, m *manifest.Manifest, access *installSources, tar
 			continue
 		}
 		if !access.restore && targets != nil && !access.targets[name] {
-			// Unknown legacy edges outside the request must not cause source IO.
+			// A hash-verified tree is authoritative and free to read. A missing
+			// or modified tree is not, and must not cause source IO from here.
+			// The requested closure may still load it later; otherwise it stays
+			// unknown and cannot rewrite via or orphan another entry.
+			raw, matched, err := installedRequirements(p, s, name)
+			if err != nil {
+				return nil, err
+			}
+			if matched {
+				pin.Requires = &raw
+				continue
+			}
 			access.legacy[name] = true
+			access.unknown[name] = true
 			empty := []string{}
 			pin.Requires = &empty
 			continue
@@ -454,6 +473,7 @@ func buildInstallPlan(p paths, current *manifest.Manifest, targets []dependency.
 				}
 				s.Resolved.Requires = &raw
 				delete(access.legacy, name)
+				delete(access.unknown, name)
 				changed = true
 			}
 			for _, text := range nodes[name].Requires {
@@ -469,23 +489,25 @@ func buildInstallPlan(p paths, current *manifest.Manifest, targets []dependency.
 				return nil, err
 			}
 		}
-		hasEdges := false
-		for _, n := range plan.Nodes {
-			hasEdges = hasEdges || len(n.Requires) > 0
-		}
-		if hasEdges {
-			for _, name := range sortedNames(current.Skills) {
-				if access.legacy[name] {
-					if err := visit(name); err != nil {
-						return nil, err
-					}
-				}
-			}
-		}
 		if !changed {
 			return plan, nil
 		}
 	}
+}
+
+// installedRequirements reads requirements from a hash-verified skill directory.
+// matched is false when the tree is missing or modified.
+func installedRequirements(p paths, s *manifest.Skill, name string) (raw []string, matched bool, err error) {
+	matched, err = hashMatches(filepath.Join(p.skillsDir, name), s.Resolved.Hash)
+	if err != nil || !matched {
+		return nil, matched, err
+	}
+	meta, err := source.ReadSkillMetadata(filepath.Join(p.skillsDir, name), name)
+	if err != nil {
+		return nil, true, validationError(err)
+	}
+	raw, err = dependency.NormalizeRequirements(meta.Requires, s.Source, false)
+	return raw, true, err
 }
 
 func pinnedRequirements(p paths, s *manifest.Skill, name string, access *installSources) ([]string, error) {
@@ -507,34 +529,124 @@ func pinnedRequirements(p paths, s *manifest.Skill, name string, access *install
 	return dependency.NormalizeRequirements(raw, s.Source, false)
 }
 
-func plannedManifest(m *manifest.Manifest, plan *dependency.Plan, staged map[string]stagedSkill) *manifest.Manifest {
+func plannedManifest(m *manifest.Manifest, plan *dependency.Plan, staged map[string]stagedSkill, unknown map[string]bool) *manifest.Manifest {
 	next := &manifest.Manifest{Sources: maps.Clone(m.Sources), Skills: map[string]*manifest.Skill{}}
 	snapshots := false
 	for _, n := range plan.Nodes {
+		if unknown[n.Name] {
+			continue
+		}
 		snapshots = snapshots || len(n.Requires) > 0
+	}
+	// Unknown requirements hide edges. Keep an existing dependency manifest
+	// instead of dropping via and direct when every known requires list is empty.
+	keepGraph := snapshots
+	if len(unknown) > 0 {
+		for _, n := range plan.Nodes {
+			if len(n.Via) > 0 || !n.Direct {
+				keepGraph = true
+				break
+			}
+		}
 	}
 	for _, n := range plan.Nodes {
 		s := &manifest.Skill{Source: n.Source, Version: n.Constraint, Via: slices.Clone(n.Via)}
 		old := m.Skills[n.Name]
-		if snapshots && !n.Direct {
+		if keepGraph && !n.Direct {
 			s.Direct = new(false)
-		} else if snapshots && old != nil && old.Direct != nil && *old.Direct {
+		} else if keepGraph && old != nil && old.Direct != nil && *old.Direct {
 			s.Direct = new(true)
 		}
-		if !snapshots || len(s.Via) == 0 {
+		if !keepGraph || len(s.Via) == 0 {
 			s.Via = nil
 		}
 		if n.Direct && s.Version == "" && n.Version != "" && (old == nil || old.Resolved == nil) {
 			s.Version = "^" + n.Version
 		}
 		s.Resolved = &manifest.Resolved{Version: n.Version, Commit: n.Commit, Hash: staged[n.Name].hash}
-		if snapshots {
+		writeRequires := snapshots && !unknown[n.Name]
+		if !writeRequires && len(unknown) > 0 && !unknown[n.Name] && old != nil && old.Resolved != nil && old.Resolved.Requires != nil {
+			writeRequires = true
+		}
+		if writeRequires {
 			raw := slices.Clone(n.Requires)
+			if raw == nil {
+				raw = []string{}
+			}
 			s.Resolved.Requires = &raw
 		}
 		next.Skills[n.Name] = s
 	}
 	return next
+}
+
+// preserveUnknownRequirementPins puts recorded parents back when their
+// requirements could not be read. An unknown pin is not evidence that an
+// edge disappeared, so it must not clear via or mark the child orphaned.
+func preserveUnknownRequirementPins(original *manifest.Manifest, plan *dependency.Plan, unknown map[string]bool) {
+	if len(unknown) == 0 || plan == nil {
+		return
+	}
+	index := make(map[string]int, len(plan.Nodes))
+	for i, n := range plan.Nodes {
+		index[n.Name] = i
+	}
+	for name, s := range original.Skills {
+		if s == nil {
+			continue
+		}
+		i, ok := index[name]
+		if !ok {
+			continue
+		}
+		n := &plan.Nodes[i]
+		if unknown[name] {
+			n.Requires = nil
+		}
+		for _, parent := range s.Via {
+			if unknown[parent] && !slices.Contains(n.Via, parent) {
+				n.Via = append(n.Via, parent)
+			}
+		}
+		slices.Sort(n.Via)
+		n.Via = slices.Compact(n.Via)
+	}
+	plan.Orphans = reachableOrphans(plan.Nodes)
+}
+
+func reachableOrphans(nodes []dependency.Node) []string {
+	children := make(map[string][]string, len(nodes))
+	present := make(map[string]bool, len(nodes))
+	for _, n := range nodes {
+		present[n.Name] = true
+		for _, parent := range n.Via {
+			children[parent] = append(children[parent], n.Name)
+		}
+	}
+	seen := map[string]bool{}
+	var walk func(string)
+	walk = func(name string) {
+		if seen[name] || !present[name] {
+			return
+		}
+		seen[name] = true
+		for _, child := range children[name] {
+			walk(child)
+		}
+	}
+	for _, n := range nodes {
+		if n.Direct {
+			walk(n.Name)
+		}
+	}
+	var orphans []string
+	for _, n := range nodes {
+		if !seen[n.Name] {
+			orphans = append(orphans, n.Name)
+		}
+	}
+	slices.Sort(orphans)
+	return orphans
 }
 
 func validationError(err error) error {

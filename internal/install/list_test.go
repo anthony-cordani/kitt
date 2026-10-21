@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/anthony-cordani/kitt/internal/install"
+	"github.com/anthony-cordani/kitt/internal/manifest"
 	"github.com/anthony-cordani/kitt/internal/testutil"
 )
 
@@ -204,4 +205,43 @@ func TestListAndDoctorLegacyUnavailableDependenciesAgree(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestListIncompleteHeadingOnlyForTransitiveEntries(t *testing.T) {
+	t.Run("unresolved direct", func(t *testing.T) {
+		f := dependencyScope(t, false)
+		dependencyRelease(t, f.repo, "leaf", "1.0.0")
+		dependencyRelease(t, f.repo, "root", "1.0.0", "leaf@^1")
+		f.add(t, "root")
+		m := loadManifest(t, f.path)
+		m.Skills["new"] = &manifest.Skill{Source: "demo"}
+		f.save(t, m)
+		got := installedTree(t, f)
+		if strings.Contains(got, "Dependency information incomplete") || strings.Contains(got, "Orphaned transitive skills") {
+			t.Fatalf("unresolved entry changed the heading:\n%s", got)
+		}
+		if !strings.Contains(got, "demo/root@1.0.0") {
+			t.Fatalf("root missing:\n%s", got)
+		}
+	})
+	t.Run("real orphan", func(t *testing.T) {
+		f := dependencyScope(t, false)
+		dependencyRelease(t, f.repo, "leaf", "1.0.0")
+		dependencyRelease(t, f.repo, "root", "1.0.0", "leaf@^1")
+		dependencyRelease(t, f.repo, "abandoned", "1.0.0")
+		f.add(t, "root")
+		f.add(t, "abandoned")
+		m := loadManifest(t, f.path)
+		direct := false
+		m.Skills["abandoned"].Direct = &direct
+		m.Skills["new"] = &manifest.Skill{Source: "demo"}
+		f.save(t, m)
+		got := installedTree(t, f)
+		if !strings.Contains(got, "Orphaned transitive skills") || !strings.Contains(got, "demo/abandoned@1.0.0") {
+			t.Fatalf("orphan section:\n%s", got)
+		}
+		if strings.Contains(got, "Dependency information incomplete") {
+			t.Fatalf("unresolved entry flipped the heading:\n%s", got)
+		}
+	})
 }
