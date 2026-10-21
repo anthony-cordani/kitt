@@ -1,12 +1,9 @@
 package dependency
 
 import (
-	"encoding/json"
 	"errors"
 	"maps"
 	"slices"
-
-	"github.com/anthony-cordani/kitt/internal/source"
 )
 
 type demand struct {
@@ -15,17 +12,47 @@ type demand struct {
 	origins  []Requirement
 }
 
-// Constraints records the predicates used when a candidate was selected. If an
-// abandoned parent removes one, reconsider the highest candidate under the new
-// graph. Compatible original pins remain fixed regardless of relaxed ranges.
-type assignment struct {
-	Node
-	Constraints []string
+// Assignments are immutable within a branch. Backtracking discards the whole
+// branch, including every outgoing edge introduced by its candidates.
+type assignment struct{ Node }
+
+const maxSearchStates = 10000
+
+// searchFailure carries the decisions that can change this failure. As a
+// decision exhausts its candidates it substitutes the decisions constraining
+// its domain, jumping over unrelated decisions. Fatal failures never backtrack.
+type searchFailure struct {
+	err    error
+	causes map[string]bool
+	fatal  bool
 }
 
-// A repeated partial assignment rejects only this candidate branch. It must not
-// be treated as malformed input, which would prematurely abort backtracking.
-var errRevisited = errors.New("dependency candidate state already examined")
+func (f *searchFailure) Error() string { return f.err.Error() }
+func (f *searchFailure) Unwrap() error { return f.err }
+
+func failureFor(err error, names ...string) *searchFailure {
+	f := &searchFailure{err: err, causes: make(map[string]bool)}
+	for _, name := range names {
+		f.causes[name] = true
+	}
+	var access *AccessError
+	var validation *ValidationError
+	var unknown *UnknownSourceError
+	var noReleases *NoReleasesError
+	var budget *SearchBudgetError
+	f.fatal = errors.As(err, &access) || errors.As(err, &validation) || errors.As(err, &unknown) || errors.As(err, &noReleases) || errors.As(err, &budget)
+	return f
+}
+
+func demandCauses(name string, d *demand) []string {
+	names := []string{name}
+	for _, r := range d.origins {
+		if !r.Manifest && !r.Target {
+			names = append(names, r.Requester)
+		}
+	}
+	return names
+}
 
 // graph is rebuilt solely from the current assignments. No edge from an
 // abandoned candidate survives, and non-manifest descendants disappear with it.
@@ -87,81 +114,42 @@ func (p *planner) collision(name string, d *demand) error {
 }
 
 func (p *planner) search(selected map[string]assignment) (map[string]assignment, error) {
-	// JSON sorts map keys and quotes all fields, avoiding ambiguous state keys.
-	state, _ := json.Marshal(selected)
-	key := string(state)
-	if err, ok := p.failed[key]; ok {
-		return nil, err
+	if p.explored >= maxSearchStates {
+		return nil, failureFor(&SearchBudgetError{Limit: maxSearchStates, Explored: p.explored, Skills: keys(p.graph(selected))})
 	}
+	p.explored++
 	graph := p.graph(selected)
-	if p.active[key] {
-		return nil, errRevisited
-	}
-	p.active[key] = true
-	defer delete(p.active, key)
-	finish := func(err error) (map[string]assignment, error) {
-		p.failed[key] = err
-		return nil, err
-	}
-
-	// Drop unreachable assignments, then invalid candidates and all their
-	// outgoing edges before selecting replacements. Existing seeds are retained.
-	next := maps.Clone(selected)
-	for _, name := range keys(selected) {
-		n := selected[name]
-		d, reachable := graph[name]
-		if !reachable {
-			delete(next, name)
-			continue
+	if err := cycle(selected); err != nil {
+		var names []string
+		for _, step := range err.(*CycleError).Path {
+			ref, _ := ParseRef(step)
+			names = append(names, ref.Name)
 		}
-		if _, target := p.targets[name]; !target && len(d.sources) == 1 {
-			if !matches(n.Version, d.requests) {
-				delete(next, name)
-				continue
-			}
-			// A provisional constraint may have forced a pin to move. If that
-			// constraint disappeared with an abandoned candidate, restore the
-			// now-compatible original pin rather than keeping its replacement.
-			if s := p.current.Skills[name]; s != nil && s.Resolved != nil && s.Source == n.Source && matches(s.Resolved.Version, d.requests) {
-				if n.Commit != s.Resolved.Commit {
-					delete(next, name)
+		return nil, failureFor(err, names...)
+	}
+	// Source identity can never be repaired by assigning the colliding name.
+	// Check it before expanding any unrelated root or dependency.
+	for _, name := range keys(graph) {
+		d := graph[name]
+		if err := p.collision(name, d); err != nil {
+			f := failureFor(err, demandCauses(name, d)...)
+			fixed := true
+			for _, r := range d.origins {
+				if r.Manifest || r.Target {
+					continue
 				}
-				continue
-			}
-			current := constraints(d.requests)
-			for _, old := range n.Constraints {
-				if !slices.Contains(current, old) {
-					delete(next, name)
-					break
+				if _, target := p.targets[r.Requester]; target {
+					continue
+				}
+				s := p.current.Skills[r.Requester]
+				if s == nil || s.Resolved == nil || p.movable[r.Requester] {
+					fixed = false
 				}
 			}
+			f.fatal = fixed
+			return nil, f
 		}
 	}
-	if len(next) != len(selected) {
-		result, err := p.search(next)
-		if err != nil {
-			if errors.Is(err, errRevisited) {
-				if cycleErr := cycle(selected); cycleErr != nil {
-					err = cycleErr
-				} else {
-					for _, name := range keys(selected) {
-						if d := graph[name]; d != nil && !matches(selected[name].Version, d.requests) {
-							overlap, _ := source.ConstraintsOverlap(constraints(d.requests))
-							reason := EmptyIntersection
-							if overlap {
-								reason = NoMatchingRelease
-							}
-							err = &ConflictError{Scope: p.scope, Name: name, Sources: keys(d.sources), Requests: sortedRequests(d.requests), Reason: reason}
-							break
-						}
-					}
-				}
-			}
-			return finish(err)
-		}
-		return result, nil
-	}
-
 	pending := make([]string, 0)
 	for _, name := range keys(graph) {
 		if _, ok := selected[name]; !ok {
@@ -178,90 +166,105 @@ func (p *planner) search(selected map[string]assignment) (map[string]assignment,
 		return 2
 	}
 	slices.SortStableFunc(pending, func(a, b string) int { return priority(a) - priority(b) })
-	var deferred error
-	for _, name := range pending {
-		d := graph[name]
-		if err := p.collision(name, d); err != nil {
-			if deferred == nil {
-				deferred = err
+	// Expand fixed roots first so errors retain every manifest requester and
+	// explicit-target blockers take precedence over failures in their closure.
+	expandingSeeds := len(pending) > 0 && priority(pending[0]) < 2
+	if !expandingSeeds {
+		for _, name := range keys(graph) {
+			d := graph[name]
+			n, ok := selected[name]
+			if !ok || matches(n.Version, d.requests) {
+				continue
 			}
-			continue
-		}
-		candidates, err := p.candidates(name, d)
-		if err != nil {
-			var access *AccessError
-			if errors.As(err, &access) {
-				return finish(err)
-			}
-			// Expand other parents first so diagnostics include their ranges too.
-			if deferred == nil {
-				deferred = err
-			}
-			continue
-		}
-		var firstError error
-		for _, r := range candidates {
-			n, err := p.load(Node{Name: name, Source: keys(d.sources)[0], Version: r.Version, Commit: r.Commit})
-			if err == nil {
-				branch := maps.Clone(selected)
-				predicates := constraints(d.requests)
-				slices.Sort(predicates)
-				branch[name] = assignment{Node: n, Constraints: slices.Compact(predicates)}
-				var result map[string]assignment
-				result, err = p.search(branch)
-				if err == nil {
-					return result, nil
-				}
-			}
-			if firstError == nil {
-				firstError = err
-			}
-			var access *AccessError
-			var validation *ValidationError
-			var unknown *UnknownSourceError
-			if errors.As(err, &access) || errors.As(err, &validation) || errors.As(err, &unknown) {
-				return finish(err)
-			}
-		}
-		return finish(firstError)
-	}
-	for _, name := range keys(graph) {
-		d := graph[name]
-		if err := p.collision(name, d); err != nil {
-			return finish(err)
-		}
-		n, assigned := selected[name]
-		if !assigned {
-			continue
-		}
-		if !matches(n.Version, d.requests) {
 			if n.Version == "" {
-				return finish(&NoReleasesError{Scope: p.scope, Source: n.Source, Name: name, Requests: sortedRequests(d.requests)})
+				return nil, failureFor(&NoReleasesError{Scope: p.scope, Source: n.Source, Name: name, Requests: sortedRequests(d.requests)})
 			}
-			t := p.targets[name]
-			var blocking []Requirement
-			for _, r := range d.requests {
-				if !matches(n.Version, []Requirement{r}) {
-					blocking = append(blocking, r)
+			if t, target := p.targets[name]; target {
+				var blocking []Requirement
+				for _, r := range d.requests {
+					if !matches(n.Version, []Requirement{r}) {
+						blocking = append(blocking, r)
+					}
 				}
-			}
-			from := "uninstalled"
-			if s := p.current.Skills[name]; s != nil && s.Resolved != nil {
-				from = s.Resolved.Version
-				if from == "" {
-					from = s.Resolved.Commit
+				from := ""
+				if s := p.current.Skills[name]; s != nil && s.Resolved != nil {
+					from = s.Resolved.Version
+					if from == "" {
+						from = s.Resolved.Commit
+					}
 				}
+				return nil, failureFor(&UpgradeRefusalError{Source: n.Source, Name: name, From: from, To: n.Version, Operation: t.Policy, Blocking: sortedRequests(blocking)}, demandCauses(name, d)...)
 			}
-			return finish(&UpgradeRefusalError{Source: n.Source, Name: name, From: from, To: n.Version, Operation: t.Policy, Blocking: sortedRequests(blocking)})
+			return nil, failureFor(p.pinConflict(name, d), demandCauses(name, d)...)
+		}
+		// A failed domain must be handled now, before branching on unrelated names.
+		for _, name := range pending {
+			if _, err := p.candidates(name, graph[name]); err != nil {
+				return nil, failureFor(err, demandCauses(name, graph[name])...)
+			}
 		}
 	}
-	if deferred != nil {
-		return finish(deferred)
+	if len(pending) == 0 {
+		return selected, nil
 	}
-	if err := cycle(selected); err != nil {
-		return finish(err)
+	name := pending[0]
+	d := graph[name]
+	candidates, err := p.candidates(name, d)
+	if err != nil {
+		return nil, failureFor(err, demandCauses(name, d)...)
 	}
-	return selected, nil
+	var first *searchFailure
+	causes := make(map[string]bool)
+	for _, r := range candidates {
+		n, err := p.load(Node{Name: name, Source: keys(d.sources)[0], Version: r.Version, Commit: r.Commit})
+		loadFailed := err != nil
+		if err == nil {
+			branch := maps.Clone(selected)
+			branch[name] = assignment{Node: n}
+			result, branchErr := p.search(branch)
+			if branchErr == nil {
+				return result, nil
+			}
+			err = branchErr
+		}
+		var f *searchFailure
+		if !errors.As(err, &f) {
+			f = failureFor(err, name)
+		}
+		// Invalid frontmatter belongs to this release, unlike invalid dependency
+		// references and malformed release lists, which remain fatal input errors.
+		var candidate *candidateValidationError
+		if loadFailed && errors.As(err, &candidate) {
+			f.fatal = false
+			f.causes[name] = true
+		}
+		if f.fatal {
+			return nil, f
+		}
+		if !f.causes[name] {
+			return nil, f
+		}
+		if t, target := p.targets[name]; target && t.Policy == Install {
+			var conflict *ConflictError
+			if !errors.As(err, &conflict) || conflict.Pinned == "" {
+				return nil, f
+			}
+		}
+		if first == nil {
+			first = f
+		}
+		for cause := range f.causes {
+			if cause != name {
+				causes[cause] = true
+			}
+		}
+	}
+	for _, cause := range demandCauses(name, d) {
+		if cause != name {
+			causes[cause] = true
+		}
+	}
+	return nil, &searchFailure{err: first.err, causes: causes}
 }
 
 func cycle(nodes map[string]assignment) error {

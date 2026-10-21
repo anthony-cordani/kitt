@@ -113,6 +113,7 @@ type ConflictError struct {
 	Sources  []string
 	Requests []Requirement
 	Reason   ConflictReason
+	Pinned   string
 }
 
 func (e *ConflictError) Error() string {
@@ -142,6 +143,9 @@ func (e *ConflictError) Error() string {
 			}
 			lines += fmt.Sprintf("\n  %s requires %q", r.owner(), ref)
 		}
+	}
+	if e.Pinned != "" {
+		lines += fmt.Sprintf("\n  %s is pinned at %s; an explicit install or upgrade is required; use kitt upgrade %s", name, e.Pinned, e.Name)
 	}
 	return text + lines + "\n  one version per skill name is allowed in " + e.Scope.label() + " scope"
 }
@@ -204,6 +208,7 @@ type UpgradeRefusalError struct {
 	To        string
 	Operation CandidatePolicy
 	Blocking  []Requirement
+	Reason    string
 }
 
 func (e *UpgradeRefusalError) Error() string {
@@ -211,7 +216,14 @@ func (e *UpgradeRefusalError) Error() string {
 	if e.Operation == Install {
 		operation = "install"
 	}
-	return fmt.Sprintf("cannot %s %s/%s from %s to %s", operation, e.Source, e.Name, e.From, e.To) + requestLines(e.Blocking)
+	text := fmt.Sprintf("cannot %s %s/%s@%s", operation, e.Source, e.Name, e.To)
+	if e.From != "" && e.From != e.To {
+		text = fmt.Sprintf("cannot %s %s/%s from %s to %s", operation, e.Source, e.Name, e.From, e.To)
+	}
+	if e.Reason != "" {
+		text += "\n  " + e.Reason
+	}
+	return text + requestLines(e.Blocking)
 }
 
 // ValidationError preserves parse/metadata context separately from graph conflicts.
@@ -241,7 +253,25 @@ func (e *AccessError) Unwrap() error { return e.Err }
 type PlanError struct {
 	Err                   error
 	ManagedStateUntouched bool
+	// ExploredStates counts partial assignments examined before failure.
+	ExploredStates int
 }
 
 func (e *PlanError) Error() string { return e.Err.Error() }
 func (e *PlanError) Unwrap() error { return e.Err }
+
+// SearchBudgetError bounds work even for adversarial version-dependent graphs.
+type SearchBudgetError struct {
+	Limit, Explored int
+	Skills          []string
+}
+
+func (e *SearchBudgetError) Error() string {
+	return fmt.Sprintf("dependency search budget exhausted after %d states (limit %d); skills involved: %s", e.Explored, e.Limit, strings.Join(e.Skills, ", "))
+}
+
+// candidateValidationError marks a release's invalid frontmatter as recoverable.
+// Its public error is a ValidationError, preserving errors.As for callers.
+type candidateValidationError struct{ *ValidationError }
+
+func (e *candidateValidationError) Unwrap() error { return e.ValidationError }

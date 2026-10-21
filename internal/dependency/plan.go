@@ -1,6 +1,7 @@
 package dependency
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -16,6 +17,7 @@ type Release struct{ Version, Commit string }
 
 // SourceAccess supplies published releases and metadata at an exact commit.
 // Implementations must not read requirements from a branch tip instead of commit.
+// Requires should return a ValidationError for invalid release frontmatter.
 type SourceAccess interface {
 	Releases(source, skill string) ([]Release, error)
 	Requires(source, skill, commit string) ([]string, error)
@@ -77,32 +79,45 @@ type planner struct {
 	requires     map[string][]string
 	accessErrors map[string]error
 	indexes      map[string]map[string]int
-	failed       map[string]error
-	active       map[string]bool
+	explored     int
+	movable      map[string]bool
 }
 
 // BuildPlan plans one scope without writing managed state or mutating inputs.
 // All current entries participate, including orphans. Source access is lazy and
 // memoized per invocation; known snapshots on retained pins require no access.
-// Explicit targets are fixed to their policy's preferred candidate, never lowered
-// to work around dependency failures. An error always returns a nil plan.
+// Explicit targets use their policy's preferred candidate. A new install may
+// try an older release to retain an existing compatible pin; other dependency
+// failures never lower explicit targets. An error always returns a nil plan.
 func BuildPlan(scope Scope, current *manifest.Manifest, targets []Target, access SourceAccess) (result *Plan, planErr error) {
+	var p *planner
 	defer func() {
 		if planErr != nil {
-			planErr = &PlanError{Err: planErr, ManagedStateUntouched: true}
+			var f *searchFailure
+			if errors.As(planErr, &f) {
+				planErr = f.err
+			}
+			explored := 0
+			if p != nil {
+				explored = p.explored
+			}
+			planErr = &PlanError{Err: planErr, ManagedStateUntouched: true, ExploredStates: explored}
 		}
 	}()
 	if current == nil {
 		return nil, &ValidationError{Location: "manifest", Err: fmt.Errorf("must not be nil")}
 	}
-	p := &planner{
+	p = &planner{
 		scope: scope, current: current, access: access,
 		seeds: make(map[string]*manifest.Skill), targets: make(map[string]Target), locked: make(map[string]Release),
-		releases: make(map[string][]Release), requires: make(map[string][]string), failed: make(map[string]error), active: make(map[string]bool),
+		releases: make(map[string][]Release), requires: make(map[string][]string), movable: make(map[string]bool),
 		indexes:      make(map[string]map[string]int),
 		accessErrors: make(map[string]error),
 	}
 	if err := p.prepare(targets); err != nil {
+		return nil, err
+	}
+	if err := p.preparePins(); err != nil {
 		return nil, err
 	}
 	selected, err := p.search(map[string]assignment{})
@@ -186,6 +201,9 @@ func (p *planner) prepare(targets []Target) error {
 				t.Source = keys(p.current.Sources)[0]
 			}
 		}
+		if t.Source == "" {
+			return &ValidationError{Location: "target " + t.Name, Err: fmt.Errorf("specify an alias/ qualifier; configured source aliases: %s", strings.Join(keys(p.current.Sources), ", "))}
+		}
 		if err := p.validateName(t.Source, t.Name); err != nil {
 			return err
 		}
@@ -267,6 +285,12 @@ func (p *planner) load(n Node) (Node, error) {
 			var err error
 			raw, err = p.access.Requires(n.Source, n.Name, n.Commit)
 			if err != nil {
+				var validation *ValidationError
+				if errors.As(err, &validation) {
+					failure := &candidateValidationError{&ValidationError{Location: nodeRef(n) + " " + n.Name + "/SKILL.md", Err: err}}
+					p.accessErrors["requires "+key] = failure
+					return Node{}, failure
+				}
 				failure := &AccessError{Source: n.Source, Name: n.Name, Commit: n.Commit, Operation: "read requirements", Err: err}
 				p.accessErrors["requires "+key] = failure
 				return Node{}, failure
@@ -354,12 +378,15 @@ func (p *planner) candidates(name string, d *demand) ([]Release, error) {
 		// Explicit candidate policy is evaluated without dependent constraints.
 		requests = []Requirement{{Ref: Ref{Constraint: s.Version}}}
 	}
-	if pin != nil && (!target || (t.Policy == Install && t.Constraint == "")) && matches(pin.Version, requests) {
+	if pin != nil && !p.movable[name] && (!target || (t.Policy == Install && t.Constraint == "")) && matches(pin.Version, requests) {
 		r := Release{Version: pin.Version, Commit: pin.Commit}
 		if target {
 			p.locked[name] = r
 		}
 		return []Release{r}, nil
+	}
+	if pin != nil && !target && !p.movable[name] {
+		return nil, p.pinConflict(name, d)
 	}
 	overlap, _ := source.ConstraintsOverlap(constraints(requests))
 	if !overlap {
@@ -399,10 +426,60 @@ func (p *planner) candidates(name string, d *demand) ([]Release, error) {
 	if target {
 		r := out[0]
 		if pin != nil && t.Policy == Upgrade && pin.Version != "" && semver.Compare("v"+r.Version, "v"+pin.Version) < 0 {
-			return nil, &UpgradeRefusalError{Source: alias, Name: name, From: pin.Version, To: r.Version, Operation: t.Policy, Blocking: sortedRequests(d.requests)}
+			return nil, &UpgradeRefusalError{Source: alias, Name: name, From: pin.Version, To: r.Version, Operation: t.Policy, Reason: "the only matching release is below the pin"}
+		}
+		// A new install can try an older release only to preserve a fixed pin.
+		// Other explicit-target conflicts still refuse the preferred release.
+		if pin == nil && t.Policy == Install {
+			return out, nil
 		}
 		p.locked[name] = r
 		return []Release{r}, nil
 	}
 	return out, nil
+}
+
+// Only pins already inconsistent with the fixed manifest graph may be repaired
+// implicitly. A new dependency choice cannot move a compatible existing pin.
+func (p *planner) preparePins() error {
+	nodes := make(map[string]assignment)
+	for _, name := range keys(p.current.Skills) {
+		s := p.current.Skills[name]
+		if s.Resolved == nil {
+			continue
+		}
+		if _, target := p.targets[name]; target {
+			continue
+		}
+		n, err := p.load(Node{Name: name, Source: s.Source, Version: s.Resolved.Version, Commit: s.Resolved.Commit})
+		if err != nil {
+			return err
+		}
+		for _, text := range n.Requires {
+			ref, _ := ParseRef(text)
+			if ref.Name == name {
+				return &CycleError{Path: []string{nodeRef(n), nodeRef(n)}}
+			}
+		}
+		nodes[name] = assignment{Node: n}
+	}
+	graph := p.graph(nodes)
+	for name, n := range nodes {
+		if d := graph[name]; d != nil && !matches(n.Version, d.requests) {
+			p.movable[name] = true
+		}
+	}
+	return nil
+}
+
+func (p *planner) pinConflict(name string, d *demand) *ConflictError {
+	reason := NoMatchingRelease
+	if overlap, _ := source.ConstraintsOverlap(constraints(d.requests)); !overlap {
+		reason = EmptyIntersection
+	}
+	e := &ConflictError{Scope: p.scope, Name: name, Sources: keys(d.sources), Requests: sortedRequests(d.requests), Reason: reason}
+	if s := p.current.Skills[name]; s != nil && s.Resolved != nil && !p.movable[name] {
+		e.Pinned = s.Resolved.Version
+	}
+	return e
 }

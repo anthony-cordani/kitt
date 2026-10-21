@@ -2,8 +2,11 @@ package dependency_test
 
 import (
 	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/anthony-cordani/kitt/internal/dependency"
@@ -83,4 +86,67 @@ func TestGitPlannerUsesSelectedTaggedCommitAndRejectsUntaggedDependency(t *testi
 			t.Fatalf("obsolete cached tag used instead of branch tip: %+v", n)
 		}
 	})
+}
+
+func TestGitRequiresCachedCommitOfflineAfterFailedRefresh(t *testing.T) {
+	testutil.IsolateHome(t)
+	repo := testutil.NewRepo(t)
+	commit := testutil.Release(t, repo, "a", "1.0.0")
+	aliases := map[string]string{"team": testutil.URL(repo)}
+	if _, err := source.Open("team", aliases["team"]); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(repo); err != nil {
+		t.Fatal(err)
+	}
+	g := dependency.NewGitSources(aliases)
+	if _, err := g.Releases("team", "a"); err == nil {
+		t.Fatal("expected unavailable remote")
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := g.Requires("team", "a", commit); err != nil {
+			t.Fatalf("cached commit requires a remote: %v", err)
+		}
+	}
+	m := &manifest.Manifest{Sources: aliases, Skills: map[string]*manifest.Skill{"a": pin("team", "1.0.0", commit, true)}}
+	m.Skills["a"].Resolved.Requires = nil
+	build(t, m, nil, dependency.NewGitSources(aliases))
+}
+
+func TestGitPlannerInvalidReleaseMetadataFallsBackWithValidationContext(t *testing.T) {
+	for _, validOlder := range []bool{true, false} {
+		t.Run(fmt.Sprint(validOlder), func(t *testing.T) {
+			testutil.IsolateHome(t)
+			repo := testutil.NewRepo(t)
+			if validOlder {
+				testutil.Release(t, repo, "d", "1.0.0")
+			}
+			testutil.WriteFile(t, filepath.Join(repo, "skills", "d", "SKILL.md"), "---\nname: d\ndescription: invalid release\nmetadata:\n  version: 1.9.0\n  requires: [1]\n---\n")
+			testutil.Commit(t, repo, "invalid d release")
+			testutil.Git(t, repo, "tag", "d/v1.9.0")
+			testutil.WriteSkillRequires(t, repo, "root", "1.0.0", []string{"d@^1"})
+			testutil.Commit(t, repo, "root release")
+			testutil.Git(t, repo, "tag", "root/v1.0.0")
+			m := input()
+			m.Sources["team"] = testutil.URL(repo)
+			if validOlder {
+				p := build(t, m, []dependency.Target{target("root")}, dependency.NewGitSources(m.Sources))
+				if node(t, p, "d").Version != "1.0.0" {
+					t.Fatalf("invalid newest release selected: %+v", p)
+				}
+			} else {
+				err := failure(t, m, []dependency.Target{target("root")}, dependency.NewGitSources(m.Sources))
+				var validation *dependency.ValidationError
+				var access *dependency.AccessError
+				if !errors.As(err, &validation) || errors.As(err, &access) {
+					t.Fatalf("wrong error kind: %v", err)
+				}
+				for _, context := range []string{"team/d@1.9.0", "d/SKILL.md", "metadata.requires[0]"} {
+					if !strings.Contains(err.Error(), context) {
+						t.Fatalf("missing %s: %v", context, err)
+					}
+				}
+			}
+		})
+	}
 }

@@ -583,33 +583,54 @@ func TestPlannerDoesNotMutateSourceSlices(t *testing.T) {
 	}
 }
 
-// Compare the search with exhaustive enumeration on small version-dependent
-// graphs. This exercises partial-state revisits and pruning independently of the
-// planner's candidate traversal order.
+// Exhaustively enumerate complete assignments independently of the planner, then
+// compare feasibility, every edge, pin retention and deterministic preference.
 func TestPlannerSearchMatchesExhaustiveGraphs(t *testing.T) {
 	rng := rand.New(rand.NewSource(42))
-	for trial := 0; trial < 150; trial++ {
+	for trial := 0; trial < 300; trial++ {
 		f := fake()
 		f.add("team/root", "1.0.0", "a@^1")
+		m := input()
 		definitions := map[string]map[string][]string{}
-		names := []string{"a", "b", "c"}
+		names := []string{"a", "b", "c", "d", "e"}
 		versions := []string{"1.0.0", "1.1.0"}
+		pins := map[string]string{}
+		// Fixed leaf pins may be direct or orphaned. Random incoming constraints
+		// sometimes reject them; they must never be moved to rescue a new choice.
+		if trial%3 != 0 {
+			pins["e"] = versions[rng.Intn(2)]
+		}
+		if trial%5 == 0 {
+			pins["d"] = versions[rng.Intn(2)]
+		}
 		for _, name := range names {
 			definitions[name] = map[string][]string{}
 			for _, version := range versions {
 				var requires []string
-				for count := rng.Intn(3); count > 0; count-- {
-					requires = append(requires, names[rng.Intn(len(names))]+"@"+[]string{"^1", "1.0.0", "1.1.0"}[rng.Intn(3)])
+				if pins[name] == "" {
+					for count := rng.Intn(3); count > 0; count-- {
+						requires = append(requires, names[rng.Intn(len(names))]+"@"+[]string{"^1", "1.0.0", "1.1.0"}[rng.Intn(3)])
+					}
 				}
 				definitions[name][version] = requires
-				f.add("team/"+name, version, requires...)
+				commit := f.add("team/"+name, version, requires...)
+				if pins[name] == version {
+					m.Skills[name] = pin("team", version, commit, trial%2 == 0)
+				}
 			}
 		}
-		possible := false
-		for choice := 0; choice < 8 && !possible; choice++ {
+		var feasible []map[string]string
+		for choice := 0; choice < 1<<len(names); choice++ {
 			selected := map[string]string{}
+			pinned := true
 			for i, name := range names {
 				selected[name] = versions[(choice>>i)&1]
+				if pins[name] != "" && selected[name] != pins[name] {
+					pinned = false
+				}
+			}
+			if !pinned {
+				continue
 			}
 			active, done := map[string]bool{}, map[string]bool{}
 			var valid func(string) bool
@@ -634,17 +655,99 @@ func TestPlannerSearchMatchesExhaustiveGraphs(t *testing.T) {
 				active[name], done[name] = false, true
 				return true
 			}
-			possible = valid("a")
+			ok := valid("a")
+			for name := range pins {
+				ok = ok && valid(name)
+			}
+			if ok {
+				reachable := map[string]string{}
+				for name := range done {
+					reachable[name] = selected[name]
+				}
+				feasible = append(feasible, reachable)
+			}
 		}
-		p, err := dependency.BuildPlan(dependency.Scope{}, input(), []dependency.Target{target("root")}, f)
-		if (err == nil) != possible {
-			t.Fatalf("trial %d: possible=%v, plan=%+v, err=%v, definitions=%v", trial, possible, p, err, definitions)
+		// Compare feasible assignments by the highest release at the first
+		// differing decision in the common deterministic frontier. This ordering
+		// does not depend on enumeration order or the planner's pruning algorithm.
+		preferred := func(a, b map[string]string) bool {
+			pending := map[string]bool{"a": true}
+			visited := map[string]bool{}
+			for name := range pins {
+				pending[name] = true
+			}
+			for len(pending) > 0 {
+				ordered := slices.Sorted(maps.Keys(pending))
+				slices.SortStableFunc(ordered, func(a, b string) int {
+					pa, pb := 0, 0
+					if pins[a] != "" {
+						pa = -1
+					}
+					if pins[b] != "" {
+						pb = -1
+					}
+					return pa - pb
+				})
+				name := ordered[0]
+				delete(pending, name)
+				if visited[name] {
+					continue
+				}
+				visited[name] = true
+				if a[name] != b[name] {
+					return a[name] > b[name]
+				}
+				for _, text := range definitions[name][a[name]] {
+					r, _ := dependency.ParseRef(text)
+					if !visited[r.Name] {
+						pending[r.Name] = true
+					}
+				}
+			}
+			return false
+		}
+		var best map[string]string
+		for _, candidate := range feasible {
+			if best == nil || preferred(candidate, best) {
+				best = candidate
+			}
+		}
+		p, err := dependency.BuildPlan(dependency.Scope{}, m, []dependency.Target{target("root")}, f)
+		if (err == nil) != (best != nil) {
+			t.Fatalf("trial %d: best=%v, plan=%+v, err=%v, pins=%v, definitions=%v", trial, best, p, err, pins, definitions)
 		}
 		if err != nil {
 			var conflict *dependency.ConflictError
 			var cycle *dependency.CycleError
 			if !errors.As(err, &conflict) && !errors.As(err, &cycle) {
-				t.Fatalf("unstructured search failure in trial %d: %v", trial, err)
+				t.Fatalf("unstructured trial %d: %v", trial, err)
+			}
+			continue
+		}
+		actual := map[string]dependency.Node{}
+		for _, n := range p.Nodes {
+			actual[n.Name] = n
+		}
+		if len(actual) != len(best)+1 {
+			t.Fatalf("trial %d: stale or missing nodes: %+v, best=%v", trial, p.Nodes, best)
+		}
+		for name, version := range best {
+			n := actual[name]
+			if n.Version != version {
+				t.Fatalf("trial %d: %s=%s; highest feasible=%s; pins=%v, definitions=%v", trial, name, n.Version, version, pins, definitions)
+			}
+			if pins[name] != "" && n.Commit != m.Skills[name].Resolved.Commit {
+				t.Fatalf("trial %d: pin moved: %+v", trial, n)
+			}
+		}
+		for _, n := range p.Nodes {
+			for _, text := range n.Requires {
+				r, _ := dependency.ParseRef(text)
+				dep, ok := actual[r.Name]
+				match, _ := source.Satisfies(r.Constraint, dep.Version)
+				if !ok || !match || dep.Source != r.Source {
+					t.Fatalf("trial %d: broken edge %s -> %s: %+v", trial, n.Name, text, p.Nodes)
+				}
 			}
 		}
 	}
