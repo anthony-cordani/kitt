@@ -40,10 +40,6 @@ func ParseFile(path string) (Meta, error) {
 		return Meta{}, fmt.Errorf("parse skill frontmatter: %w", err)
 	}
 	meta := Meta{Name: doc.Name, Description: doc.Description}
-	meta.Requires, err = parseRequirements(path, doc.Metadata["requires"])
-	if err != nil {
-		return Meta{}, err
-	}
 	if node, ok := doc.Metadata["version"]; ok {
 		var value string
 		if err := node.Decode(&value); err != nil {
@@ -51,8 +47,19 @@ func ParseFile(path string) (Meta, error) {
 		}
 		meta.Version = value
 	}
+	meta.Requires, err = parseRequirements(path, doc.Metadata["requires"])
+	if err != nil {
+		return Meta{}, &RequiresDecodeError{Err: err}
+	}
 	return meta, nil
 }
+
+// RequiresDecodeError identifies errors decoding metadata.requires, so callers
+// can tolerate foreign dependency formats without hiding other frontmatter errors.
+type RequiresDecodeError struct{ Err error }
+
+func (e *RequiresDecodeError) Error() string { return e.Err.Error() }
+func (e *RequiresDecodeError) Unwrap() error { return e.Err }
 
 func parseRequirements(path string, node yaml.Node) ([]string, error) {
 	if node.Kind == 0 {
@@ -80,11 +87,10 @@ func parseRequirements(path string, node yaml.Node) ([]string, error) {
 }
 
 // ForeignRequires reports whether SKILL.md metadata.requires is outside kitt's
-// format. A value is foreign when it is not a YAML sequence of strings, or when
-// none of its string entries contains "@". A sequence with at least one "@"
-// entry is kitt-shaped even if an entry is not a valid reference. Absent
-// metadata.requires is not foreign. An unreadable file or frontmatter returns
-// an error.
+// format. A YAML sequence is kitt-shaped when empty or when at least one string
+// entry contains "@", even if other entries are invalid. All other values are
+// foreign. Absent metadata.requires is not foreign. An unreadable file or
+// frontmatter returns an error.
 func ForeignRequires(path string) (bool, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -117,26 +123,25 @@ func foreignRequiresValue(node yaml.Node) bool {
 	if node.Kind != yaml.SequenceNode {
 		return true
 	}
-	at := false
+	if len(node.Content) == 0 {
+		return false
+	}
 	for _, item := range node.Content {
 		if item == nil {
-			return true
+			continue
 		}
 		n := *item
 		if n.Kind == yaml.AliasNode {
 			if n.Alias == nil {
-				return true
+				continue
 			}
 			n = *n.Alias
 		}
-		if n.Kind != yaml.ScalarNode || n.Tag != "!!str" {
-			return true
-		}
-		if strings.Contains(n.Value, "@") {
-			at = true
+		if n.Kind == yaml.ScalarNode && n.Tag == "!!str" && strings.Contains(n.Value, "@") {
+			return false
 		}
 	}
-	return !at
+	return true
 }
 
 // ValidName reports whether name follows the Agent Skills naming rules.

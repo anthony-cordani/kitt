@@ -130,3 +130,56 @@ func TestKittShapedRequiresFailRestoreUpgradeAndInstall(t *testing.T) {
 		})
 	}
 }
+
+func TestInvalidRequiresAndVersionKeepFrontmatterErrors(t *testing.T) {
+	for _, requires := range []string{`[]`, `["leaf@^1", 123]`, `"python3"`, `["numpy"]`, `{runtime: python3}`} {
+		for _, mode := range []string{"restore", "upgrade", "install"} {
+			t.Run(requires+"/"+mode, func(t *testing.T) {
+				p, opts := legacyRequirementsFixture(t, requires)
+				want := "metadata.requires[1]"
+				if requires != `["leaf@^1", 123]` {
+					path := filepath.Join(p.skillsDir, "legacy", "SKILL.md")
+					body, err := os.ReadFile(path)
+					if err != nil {
+						t.Fatal(err)
+					}
+					testutil.WriteFile(t, path, strings.Replace(string(body), "metadata:\n", "metadata:\n  version: [1, 2]\n", 1))
+					m, err := manifest.Load(p.manifest)
+					if err != nil {
+						t.Fatal(err)
+					}
+					m.Skills["legacy"].Resolved.Hash, err = skill.Hash(filepath.Join(p.skillsDir, "legacy"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := m.Save(p.manifest); err != nil {
+						t.Fatal(err)
+					}
+					want = "metadata.version"
+				}
+				before := transactionSnapshot(t, p)
+				stderr := captureStderr(t)
+				var err error
+				switch mode {
+				case "restore":
+					err = Restore(opts)
+				case "upgrade":
+					err = Upgrade(opts, "", false)
+				default:
+					err = Add(opts, "other")
+				}
+				warning := stderr()
+				var pe *dependency.PlanError
+				if err == nil || !errors.As(err, &pe) || !pe.ManagedStateUntouched || !strings.Contains(err.Error(), want) {
+					t.Fatalf("error = %v; want %s", err, want)
+				}
+				if strings.Contains(warning, "warning:") {
+					t.Fatalf("invalid metadata tolerated: %s", warning)
+				}
+				if after := transactionSnapshot(t, p); !reflect.DeepEqual(before, after) {
+					t.Fatal("invalid frontmatter changed managed state")
+				}
+			})
+		}
+	}
+}

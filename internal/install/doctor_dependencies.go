@@ -53,7 +53,13 @@ func (d *doctor) dependencies(m *manifest.Manifest, names []string) error {
 				known[name] = true
 			}
 			if d.verified[name] {
-				meta, err := skill.ParseFile(filepath.Join(d.p.skillsDir, name, "SKILL.md"))
+				path := filepath.Join(d.p.skillsDir, name, "SKILL.md")
+				meta, err := skill.ParseFile(path)
+				foreign, ferr := skill.ForeignRequires(path)
+				var requires *skill.RequiresDecodeError
+				if ferr == nil && foreign && (err == nil || errors.As(err, &requires)) {
+					meta.Requires, err = nil, nil
+				}
 				if err != nil {
 					d.line(fmt.Sprintf("invalid dependencies: %s (%v)", name, err))
 				} else {

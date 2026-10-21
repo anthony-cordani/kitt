@@ -391,3 +391,34 @@ func TestDoctorLegacyFrontmatterDoesNotGovernVia(t *testing.T) {
 		})
 	}
 }
+
+func TestDoctorForeignRequiresWithDependenciesInPlay(t *testing.T) {
+	for _, requires := range []string{`"python3"`, `["numpy"]`, `{runtime: python3}`, `[123]`} {
+		for _, snapshot := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/snapshot=%t", requires, snapshot), func(t *testing.T) {
+				f := diagnosticFixture(t, false)
+				dependencyRelease(t, f.repo, "b", "1.0.0")
+				f.add(t, "b")
+				path := filepath.Join(skillPath(f.root, "b"), "SKILL.md")
+				testutil.WriteFile(t, path, "---\nname: b\ndescription: Foreign dependencies.\nmetadata:\n  requires: "+requires+"\n---\n")
+				m := loadManifest(t, f.path)
+				s := m.Skills["b"]
+				var err error
+				s.Resolved.Hash, err = skill.Hash(skillPath(f.root, "b"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !snapshot {
+					s.Resolved.Requires = nil
+				}
+				f.save(t, m)
+				removeSourceAndCache(t, f.repo)
+				before := f.snapshot(t)
+				if n, out := fixtureDoctor(t, f); n != 0 || out != "ok\n" {
+					t.Fatalf("doctor = %d, %q; want no findings", n, out)
+				}
+				assertSameTree(t, before, f.snapshot(t))
+			})
+		}
+	}
+}

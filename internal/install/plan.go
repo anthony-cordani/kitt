@@ -22,16 +22,15 @@ import (
 // installSources separates selecting releases from reading exact commits. Exact
 // reads use the cache first, including when the original repository is gone.
 type installSources struct {
-	current    *manifest.Manifest
-	restore    bool
-	opened     map[string]*source.Source
-	paths      paths
-	targets    map[string]bool
-	legacy     map[string]bool
-	unknown    map[string]bool // legacy pins outside the request whose tree cannot be read
-	unverified map[string]bool // legacy parents without authoritative installed requirements
-	fetched    map[string]bool
-	releases   map[string][]dependency.Release
+	current  *manifest.Manifest
+	restore  bool
+	opened   map[string]*source.Source
+	paths    paths
+	targets  map[string]bool
+	legacy   map[string]bool
+	unknown  map[string]bool // legacy pins outside the request whose tree cannot be read
+	fetched  map[string]bool
+	releases map[string][]dependency.Release
 }
 
 // Pin constraints belong to the planner, allowing release search to backtrack
@@ -372,7 +371,6 @@ func planningManifest(p paths, m *manifest.Manifest, access *installSources, tar
 	access.targets = map[string]bool{}
 	access.legacy = map[string]bool{}
 	access.unknown = map[string]bool{}
-	access.unverified = map[string]bool{}
 	for _, target := range targets {
 		access.targets[target.Name] = true
 	}
@@ -405,9 +403,6 @@ func planningManifest(p paths, m *manifest.Manifest, access *installSources, tar
 		// outside the requested closure, and on legacy pins during restore, is
 		// unknown. A sequence that contains "@" is kitt-shaped and is an error.
 		raw, matched, err := installedRequirements(p, s, name)
-		if !access.restore && (!matched || err != nil) {
-			access.unverified[name] = true
-		}
 		if err != nil {
 			if (!access.targets[name] || access.restore) && matched && foreignRequires(filepath.Join(p.skillsDir, name, "SKILL.md"), err) {
 				fmt.Fprintf(os.Stderr, "warning: requirements for %s are unknown: %v\n", name, err)
@@ -418,7 +413,7 @@ func planningManifest(p paths, m *manifest.Manifest, access *installSources, tar
 			pin.Requires = &raw
 			continue
 		}
-		if err != nil || !access.restore && !access.targets[name] {
+		if err != nil || !access.restore {
 			// A missing or modified unrelated tree is not authoritative. If the
 			// requested closure reaches it, buildDependencyPlan loads the pin.
 			access.legacy[name] = true
@@ -457,7 +452,8 @@ func planningManifest(p paths, m *manifest.Manifest, access *installSources, tar
 	return current, nil
 }
 
-// Load legacy metadata only when the requested closure actually reaches it.
+// Load legacy metadata only for the request closure and parents of moved nodes.
+// Rebuild after each discovery so the normal planner enforces every requirement.
 func buildDependencyPlan(p paths, current *manifest.Manifest, targets []dependency.Target, access *installSources, command string) (*dependency.Plan, error) {
 	for {
 		plan, err := dependency.BuildPlan(dependency.Scope{Global: p.global, ManifestPath: p.manifest, Command: command}, current, targets, access)
@@ -467,6 +463,11 @@ func buildDependencyPlan(p paths, current *manifest.Manifest, targets []dependen
 		nodes := map[string]dependency.Node{}
 		for _, n := range plan.Nodes {
 			nodes[n.Name] = n
+			if old := current.Skills[n.Name]; access.legacy[n.Name] && (old.Source != n.Source || old.Resolved.Commit != n.Commit) {
+				// The planner read the selected commit for every replaced pin.
+				delete(access.legacy, n.Name)
+				delete(access.unknown, n.Name)
+			}
 		}
 		changed := false
 		seen := map[string]bool{}
@@ -476,15 +477,9 @@ func buildDependencyPlan(p paths, current *manifest.Manifest, targets []dependen
 				return nil
 			}
 			seen[name] = true
-			if access.legacy[name] {
-				s := current.Skills[name]
-				raw, err := pinnedRequirements(p, s, name, access)
-				if err != nil {
-					return err
-				}
-				s.Resolved.Requires = &raw
-				delete(access.legacy, name)
-				delete(access.unknown, name)
+			if loaded, err := loadLegacyRequirements(p, current, nodes[name], access); err != nil {
+				return err
+			} else if loaded {
 				changed = true
 			}
 			for _, text := range nodes[name].Requires {
@@ -500,13 +495,55 @@ func buildDependencyPlan(p paths, current *manifest.Manifest, targets []dependen
 				return nil, err
 			}
 		}
-		if !changed {
-			if err := verifyUnknownParents(access.current, plan, access.unverified, access.targets); err != nil {
-				return nil, validationError(err)
+		for _, n := range plan.Nodes {
+			old := access.current.Skills[n.Name]
+			if old == nil || old.Resolved == nil || old.Source == n.Source && old.Resolved.Commit == n.Commit {
+				continue
 			}
+			parents := slices.Clone(old.Via)
+			for _, parent := range plan.Nodes {
+				for _, text := range parent.Requires {
+					r, _ := dependency.ParseSnapshotRef(text)
+					if r.Name == n.Name {
+						parents = append(parents, parent.Name)
+					}
+				}
+			}
+			slices.Sort(parents)
+			for _, parent := range slices.Compact(parents) {
+				if loaded, err := loadLegacyRequirements(p, current, nodes[parent], access); err != nil {
+					return nil, err
+				} else if loaded {
+					changed = true
+				}
+			}
+		}
+		if !changed {
 			return plan, nil
 		}
 	}
+}
+
+// A moved pin already has authoritative requirements from its selected commit.
+// An unchanged legacy pin needs its old commit only when this request reaches it.
+func loadLegacyRequirements(p paths, current *manifest.Manifest, n dependency.Node, access *installSources) (bool, error) {
+	if !access.legacy[n.Name] {
+		return false, nil
+	}
+	s := current.Skills[n.Name]
+	if s.Source != n.Source || s.Resolved.Commit != n.Commit {
+		delete(access.legacy, n.Name)
+		delete(access.unknown, n.Name)
+		return false, nil
+	}
+	raw, err := pinnedRequirements(p, s, n.Name, access)
+	if err != nil {
+		return false, err
+	}
+	s.Resolved.Requires = &raw
+	delete(access.legacy, n.Name)
+	delete(access.unknown, n.Name)
+	return true, nil
 }
 
 // installedRequirements reads requirements from a hash-verified skill directory.
@@ -536,7 +573,8 @@ func foreignRequires(path string, err error) bool {
 		return false
 	}
 	if _, parseErr := skill.ParseFile(path); parseErr != nil {
-		return true
+		var requires *skill.RequiresDecodeError
+		return errors.As(parseErr, &requires)
 	}
 	var validation *dependency.ValidationError
 	return errors.As(err, &validation) && strings.HasPrefix(validation.Location, "metadata.requires")
@@ -556,6 +594,10 @@ func pinnedRequirements(p paths, s *manifest.Skill, name string, access *install
 	}
 	raw, err := access.Requires(s.Source, name, s.Resolved.Commit)
 	if err != nil {
+		var failure *dependency.AccessError
+		if errors.As(err, &failure) {
+			return nil, &dependency.PlanError{Err: &dependency.AccessError{Source: s.Source, Name: name, Commit: s.Resolved.Commit, Operation: "read requirements", Err: err}, ManagedStateUntouched: true}
+		}
 		return nil, err
 	}
 	return dependency.NormalizeRequirements(raw, s.Source, false)
@@ -642,45 +684,6 @@ func preserveUnknownRequirementPins(original *manifest.Manifest, plan *dependenc
 		n.Via = slices.Compact(n.Via)
 	}
 	plan.Orphans = reachableOrphans(plan.Nodes)
-}
-
-// A recorded edge from an unverifiable legacy parent still protects its child
-// while that parent stays at its current commit. A command target or a parent
-// the plan moves is authoritative: its requirements come from the selected commit.
-func verifyUnknownParents(original *manifest.Manifest, plan *dependency.Plan, unverified, targets map[string]bool) error {
-	chosen := make(map[string]dependency.Node, len(plan.Nodes))
-	for _, n := range plan.Nodes {
-		chosen[n.Name] = n
-	}
-	for _, n := range plan.Nodes {
-		s := original.Skills[n.Name]
-		if s == nil || s.Resolved == nil || s.Source == n.Source && s.Resolved.Commit == n.Commit {
-			continue
-		}
-		for _, parent := range s.Via {
-			if unverified[parent] && unverifiedParentStays(original, parent, chosen, targets) {
-				return fmt.Errorf("cannot verify that %s accepts %s %s; run `kitt install` to restore %s first", parent, n.Name, versionLabel(n.Version, n.Commit), parent)
-			}
-		}
-	}
-	return nil
-}
-
-// unverifiedParentStays reports a parent this command does not retarget and
-// whose selected source and commit are unchanged.
-func unverifiedParentStays(original *manifest.Manifest, parent string, chosen map[string]dependency.Node, targets map[string]bool) bool {
-	if targets[parent] {
-		return false
-	}
-	n, ok := chosen[parent]
-	if !ok {
-		return true
-	}
-	old := original.Skills[parent]
-	if old == nil || old.Resolved == nil {
-		return false
-	}
-	return old.Source == n.Source && old.Resolved.Commit == n.Commit
 }
 
 func reachableOrphans(nodes []dependency.Node) []string {

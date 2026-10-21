@@ -866,49 +866,40 @@ func assertLinkUntouched(t *testing.T, path string, before os.FileInfo, target s
 	}
 }
 
-func TestUnknownLegacyParentRefusesDependencyMovement(t *testing.T) {
+func TestLegacyParentPinnedRequirementsBlockIncompatibleInstall(t *testing.T) {
 	for _, missing := range []bool{false, true} {
-		for _, operation := range []string{"install", "upgrade", "major upgrade"} {
-			t.Run(fmt.Sprintf("missing=%t/%s", missing, operation), func(t *testing.T) {
-				f := dependencyScope(t, false)
-				dependencyRelease(t, f.repo, "leaf", "1.0.0")
-				dependencyRelease(t, f.repo, "a", "1.0.0", "leaf@^1")
-				f.add(t, "a")
-				m := loadManifest(t, f.path)
-				m.Skills["a"].Resolved.Requires = nil
-				f.save(t, m)
-				if missing {
-					if err := os.RemoveAll(skillPath(f.root, "a")); err != nil {
-						t.Fatal(err)
-					}
-				} else {
-					testutil.WriteFile(t, filepath.Join(skillPath(f.root, "a"), "SKILL.md"), "local edit\n")
+		t.Run(fmt.Sprintf("missing=%t", missing), func(t *testing.T) {
+			f := dependencyScope(t, false)
+			dependencyRelease(t, f.repo, "leaf", "1.0.0")
+			dependencyRelease(t, f.repo, "a", "1.0.0", "leaf@^1")
+			f.add(t, "a")
+			m := loadManifest(t, f.path)
+			m.Skills["a"].Resolved.Requires = nil
+			f.save(t, m)
+			if missing {
+				if err := os.RemoveAll(skillPath(f.root, "a")); err != nil {
+					t.Fatal(err)
 				}
-				dependencyRelease(t, f.repo, "leaf", "1.1.0")
-				dependencyRelease(t, f.repo, "leaf", "2.0.0")
-				before := f.snapshot(t)
-				version := "1.1.0"
-				var err error
-				if operation == "install" {
-					version = "2.0.0"
-					err = install.Add(f.opts, "leaf@^2")
-				} else {
-					major := operation == "major upgrade"
-					if major {
-						version = "2.0.0"
-					}
-					err = install.Upgrade(f.opts, "leaf", major)
-				}
-				want := "cannot verify that a accepts leaf " + version + "; run `kitt install` to restore a first"
-				assertUntouchedError(t, err, want)
-				assertSameTree(t, before, f.snapshot(t))
-				assertNoTempDirs(t, f.root)
-			})
-		}
+			} else {
+				testutil.WriteFile(t, filepath.Join(skillPath(f.root, "a"), "SKILL.md"), "local edit\n")
+			}
+			dependencyRelease(t, f.repo, "leaf", "2.0.0")
+			// Neither the latest release nor HEAD describes the pinned parent's range.
+			dependencyRelease(t, f.repo, "a", "2.0.0", "leaf@^2")
+			before := f.snapshot(t)
+			err := install.Add(f.opts, "leaf@^2")
+			assertUntouchedError(t, err, "cannot install demo/leaf from 1.0.0 to 2.0.0\n  demo/a@1.0.0 requires ^1")
+			var access *dependency.AccessError
+			if errors.As(err, &access) {
+				t.Fatalf("conflict reported as source failure: %v", err)
+			}
+			assertSameTree(t, before, f.snapshot(t))
+			assertNoTempDirs(t, f.root)
+		})
 	}
 }
 
-func TestUnverifiedParentTargetMovesItsDependency(t *testing.T) {
+func TestLegacyParentTargetUsesSelectedRequirements(t *testing.T) {
 	for _, missing := range []bool{false, true} {
 		for _, operation := range []string{"install", "upgrade"} {
 			t.Run(fmt.Sprintf("missing=%t/%s", missing, operation), func(t *testing.T) {
@@ -948,7 +939,7 @@ func TestUnverifiedParentTargetMovesItsDependency(t *testing.T) {
 	}
 }
 
-func TestBulkUpgradeUnverifiedParentUsesSelectedCommit(t *testing.T) {
+func TestBulkUpgradeLegacyParentAllowsCompatibleDependency(t *testing.T) {
 	for _, missing := range []bool{false, true} {
 		t.Run(fmt.Sprintf("missing=%t", missing), func(t *testing.T) {
 			f := dependencyScope(t, false)
@@ -981,6 +972,69 @@ func TestBulkUpgradeUnverifiedParentUsesSelectedCommit(t *testing.T) {
 				t.Fatalf("unmoved parent was rewritten: %q", text)
 			}
 			assertNoTempDirs(t, f.root)
+		})
+	}
+}
+
+func TestNeededLegacyParentAccessFailureLeavesStateUntouched(t *testing.T) {
+	for _, operation := range []string{"install", "upgrade"} {
+		t.Run(operation, func(t *testing.T) {
+			f := dependencyScope(t, false)
+			leafRepo := testutil.NewRepo(t)
+			dependencyRelease(t, leafRepo, "leaf", "1.0.0")
+			m := loadManifest(t, f.path)
+			m.Sources["other"] = testutil.URL(leafRepo)
+			f.save(t, m)
+			dependencyRelease(t, f.repo, "a", "1.0.0", "other/leaf@^1")
+			f.add(t, "demo/a")
+			m = loadManifest(t, f.path)
+			pin := m.Skills["a"].Resolved
+			pin.Requires = nil
+			f.save(t, m)
+			if err := os.RemoveAll(skillPath(f.root, "a")); err != nil {
+				t.Fatal(err)
+			}
+			dependencyRelease(t, leafRepo, "leaf", "1.1.0")
+			removeSourceAndCache(t, f.repo)
+			before := f.snapshot(t)
+			var err error
+			if operation == "install" {
+				err = install.Add(f.opts, "leaf@^1")
+			} else {
+				err = install.Upgrade(f.opts, "leaf", false)
+			}
+			assertUntouchedError(t, err, "read requirements demo/a")
+			var access *dependency.AccessError
+			if !errors.As(err, &access) || access.Source != "demo" || access.Name != "a" || access.Commit != pin.Commit || access.Operation != "read requirements" || !strings.Contains(err.Error(), pin.Commit) {
+				t.Fatalf("missing parent access context: %v (%+v)", err, access)
+			}
+			assertSameTree(t, before, f.snapshot(t))
+			assertNoTempDirs(t, f.root)
+		})
+	}
+}
+
+func TestLegacyParentAllowsCompatibleDependencyUpgrade(t *testing.T) {
+	for _, major := range []bool{false, true} {
+		t.Run(fmt.Sprintf("major=%t", major), func(t *testing.T) {
+			f := dependencyScope(t, false)
+			dependencyRelease(t, f.repo, "leaf", "1.0.0")
+			dependencyRelease(t, f.repo, "a", "1.0.0", "leaf@^1")
+			f.add(t, "a")
+			m := loadManifest(t, f.path)
+			m.Skills["a"].Resolved.Requires = nil
+			f.save(t, m)
+			if err := os.RemoveAll(skillPath(f.root, "a")); err != nil {
+				t.Fatal(err)
+			}
+			dependencyRelease(t, f.repo, "leaf", "1.1.0")
+			dependencyRelease(t, f.repo, "leaf", "2.0.0")
+			f.upgrade(t, "leaf", major)
+			got := loadManifest(t, f.path)
+			if got.Skills["leaf"].Resolved.Version != "1.1.0" || !slices.Equal(got.Skills["leaf"].Via, []string{"a"}) {
+				t.Fatalf("leaf = %+v", got.Skills["leaf"])
+			}
+			assertMissing(t, skillPath(f.root, "a"))
 		})
 	}
 }
