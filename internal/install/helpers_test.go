@@ -235,6 +235,7 @@ func lineWith(out string, fields ...string) bool {
 
 // snapshot walks root and records file bytes and link targets.
 // .git is skipped: its stat cache is not project content.
+// Symlinks and Windows junctions are recorded by target, never read as files.
 func snapshot(t *testing.T, root string) map[string]string {
 	t.Helper()
 	got := map[string]string{}
@@ -252,16 +253,18 @@ func snapshot(t *testing.T, root string) map[string]string {
 		if rel == ".git" || strings.HasPrefix(rel, ".git"+string(filepath.Separator)) {
 			return filepath.SkipDir
 		}
-		if !d.IsDir() && !d.Type().IsRegular() {
-			// Symlinks, and on Windows the junctions kitt creates (reported as irregular files).
-			target, err := os.Readlink(path)
-			if err != nil {
-				target = "?"
-			}
+		info, target, link, err := testutil.StatLink(path)
+		if err != nil {
+			return err
+		}
+		if link {
 			got[rel] = "link:" + target
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
 			return nil
 		}
-		if d.IsDir() {
+		if info.IsDir() {
 			got[rel] = "dir"
 			return nil
 		}

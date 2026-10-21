@@ -69,6 +69,7 @@ func (f dependencyFixture) save(t *testing.T, m *manifest.Manifest) {
 }
 
 // Global source caches may change during planning. Snapshot only managed state.
+// snapshot records symlinks and Windows junctions by target instead of reading them.
 func (f dependencyFixture) snapshot(t *testing.T) map[string]string {
 	t.Helper()
 	got := map[string]string{"manifest": readText(t, f.path)}

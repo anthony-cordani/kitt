@@ -108,25 +108,29 @@ func transactionSnapshot(t *testing.T, p paths) map[string]string {
 			if err != nil {
 				return err
 			}
-			info, err := entry.Info()
+			info, target, link, err := testutil.StatLink(path)
 			if err != nil {
 				return err
 			}
 			value := info.Mode().String()
-			if info.Mode()&os.ModeSymlink != 0 {
-				target, err := os.Readlink(path)
-				if err != nil {
-					return err
+			if link {
+				result[path] = value + target
+				// WalkDir skips a non-directory on its own. SkipDir on one would
+				// skip the rest of the parent.
+				if entry.IsDir() {
+					return fs.SkipDir
 				}
-				value += target
-			} else if !entry.IsDir() {
-				data, err := os.ReadFile(path)
-				if err != nil {
-					return err
-				}
-				value += string(data)
+				return nil
 			}
-			result[path] = value
+			if info.IsDir() {
+				result[path] = value
+				return nil
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			result[path] = value + string(data)
 			return nil
 		})
 		if err != nil {
@@ -136,10 +140,10 @@ func transactionSnapshot(t *testing.T, p paths) map[string]string {
 	return result
 }
 
-func transactionFixture(t *testing.T, global bool) (paths, Options, string) {
+func transactionProject(t *testing.T, global bool, repo string) (paths, Options) {
 	t.Helper()
 	home := testutil.IsolateHome(t)
-	root, repo := testutil.NewRepo(t), testutil.NewRepo(t)
+	root := testutil.NewRepo(t)
 	opts := Options{Root: root, Global: global}
 	p, err := locate(opts)
 	if err != nil {
@@ -149,6 +153,14 @@ func transactionFixture(t *testing.T, global bool) (paths, Options, string) {
 		p.root = home
 	}
 	testutil.WriteFile(t, p.manifest, fmt.Sprintf("[sources]\ndemo = %q\n", testutil.URL(repo)))
+	return p, opts
+}
+
+func transactionFixture(t *testing.T, global bool) (paths, Options, string) {
+	t.Helper()
+	testutil.IsolateHome(t)
+	repo := testutil.NewRepo(t)
+	p, opts := transactionProject(t, global, repo)
 	return p, opts, repo
 }
 
@@ -160,24 +172,28 @@ func transactionRelease(t *testing.T, repo, name, version string, requires ...st
 }
 
 func TestApplyTransactionRollbackAndRetry(t *testing.T) {
+	// One source repository for every subtest. The first install stays pinned to
+	// 1.0.0 so leaf@^1 does not select 2.0.0 from that shared history.
+	testutil.IsolateHome(t)
+	repo := testutil.NewRepo(t)
+	transactionRelease(t, repo, "leaf", "1.0.0")
+	transactionRelease(t, repo, "root", "1.0.0", "leaf@^1")
+	transactionRelease(t, repo, "extra", "1.0.0")
+	transactionRelease(t, repo, "leaf", "2.0.0")
+	transactionRelease(t, repo, "root", "2.0.0", "leaf@^2", "extra@^1")
 	for _, global := range []bool{false, true} {
 		for _, failure := range []string{"rename", "finish", "ownership", "manifest", "gitignore"} {
 			if global && failure == "gitignore" {
 				continue
 			}
 			t.Run(fmt.Sprintf("global=%t/%s", global, failure), func(t *testing.T) {
-				p, opts, repo := transactionFixture(t, global)
-				transactionRelease(t, repo, "leaf", "1.0.0")
-				transactionRelease(t, repo, "root", "1.0.0", "leaf@^1")
+				p, opts := transactionProject(t, global, repo)
 				if !global {
 					testutil.WriteFile(t, filepath.Join(p.root, "AGENTS.md"), templates.BootstrapMarker+"\n"+templates.DocsStart+"\nold index\n"+templates.DocsEnd+"\n")
 				}
-				if err := Add(opts, "root"); err != nil {
+				if err := Add(opts, "root@1.0.0"); err != nil {
 					t.Fatal(err)
 				}
-				transactionRelease(t, repo, "extra", "1.0.0")
-				transactionRelease(t, repo, "leaf", "2.0.0")
-				transactionRelease(t, repo, "root", "2.0.0", "leaf@^2", "extra@^1")
 				if !global {
 					if err := os.Remove(filepath.Join(p.root, "CLAUDE.md")); err != nil {
 						t.Fatal(err)
