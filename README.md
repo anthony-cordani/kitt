@@ -89,6 +89,8 @@ metadata:
 
 Use a space-separated string: kitt < 0.2.0 reads metadata values as strings and fails on a YAML list, so a list in a published skill breaks consumers still on 0.1.x. kitt >= 0.2.0 also accepts a list.
 
+kitt reads `metadata.requires` as skill dependencies whenever a string or list entry contains `@`. If a skill uses `metadata.requires` for something else (such as `node@18`), it must not use `@` there or kitt treats it as a skill dependency; values without `@` (such as `python3`) are ignored.
+
 Use `name@constraint` for the same source or `alias/name@constraint` for another source configured in `[sources]`. A constraint is mandatory: only exact `X.Y.Z` and caret `^X[.Y[.Z]]` are accepted. Caret means the same major at or above the floor, including major zero: `^0.2` accepts later `0.x` releases. Dependencies must have published releases; a branch-tip pin cannot satisfy a requirement.
 
 - `install <skill>` resolves its dependencies and reuses compatible pins; `install` restores the pinned set. Installing an existing transitive skill without a range marks it direct and keeps its pin.
