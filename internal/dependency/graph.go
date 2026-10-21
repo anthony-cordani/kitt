@@ -157,18 +157,27 @@ func (p *planner) search(selected map[string]assignment) (map[string]assignment,
 		}
 	}
 	priority := func(name string) int {
-		if _, ok := p.targets[name]; ok {
+		if t, ok := p.targets[name]; ok {
+			if t.BoundByDependents {
+				// Expand parents before selecting within their ranges.
+				return 4
+			}
 			return 0
 		}
-		if _, ok := p.seeds[name]; ok {
-			return 1
+		if s := p.seeds[name]; s != nil {
+			// Expand a necessarily changed pin before compatible pins so its
+			// new requirements determine whether those pins need to move.
+			if s.Resolved != nil && !matches(s.Resolved.Version, graph[name].requests) && p.pinMayMove(name, graph[name]) {
+				return 1
+			}
+			return 2
 		}
-		return 2
+		return 3
 	}
 	slices.SortStableFunc(pending, func(a, b string) int { return priority(a) - priority(b) })
 	// Expand fixed roots first so errors retain every manifest requester and
 	// explicit-target blockers take precedence over failures in their closure.
-	expandingSeeds := len(pending) > 0 && priority(pending[0]) < 2
+	expandingSeeds := len(pending) > 0 && priority(pending[0]) < 3
 	if !expandingSeeds {
 		for _, name := range keys(graph) {
 			d := graph[name]
@@ -314,7 +323,7 @@ func (p *planner) plan(selected map[string]Node) *Plan {
 		if s := p.seeds[name]; s != nil {
 			n.Direct = s.IsDirect()
 		}
-		if _, ok := p.targets[name]; ok {
+		if t, ok := p.targets[name]; ok && !t.PreserveDirect {
 			n.Direct = true
 		}
 		graphNodes = append(graphNodes, n)
@@ -326,7 +335,7 @@ func (p *planner) plan(selected map[string]Node) *Plan {
 		if s := p.seeds[name]; s != nil {
 			n.Constraint, n.Direct = s.Version, s.IsDirect()
 		}
-		if _, ok := p.targets[name]; ok {
+		if t, ok := p.targets[name]; ok && !t.PreserveDirect {
 			n.Direct = true
 		}
 		n.Via = graph.Via[name]

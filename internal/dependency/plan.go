@@ -45,6 +45,12 @@ const (
 type Target struct {
 	Name, Source, Constraint string
 	Policy                   CandidatePolicy
+	// PreserveDirect keeps an existing transitive entry transitive. Installs
+	// retain their default promotion behavior.
+	PreserveDirect bool
+	// BoundByDependents selects the highest candidate within incoming ranges,
+	// rather than proposing a candidate independently of those ranges.
+	BoundByDependents bool
 }
 
 // Node is the final pin and derived graph data. Requires is normalized, sorted,
@@ -365,7 +371,7 @@ func (p *planner) candidates(name string, d *demand) ([]Release, error) {
 	s := p.seeds[name]
 	t, target := p.targets[name]
 	if target {
-		if r, ok := p.locked[name]; ok {
+		if r, ok := p.locked[name]; ok && !t.BoundByDependents {
 			return []Release{r}, nil
 		}
 	}
@@ -374,7 +380,7 @@ func (p *planner) candidates(name string, d *demand) ([]Release, error) {
 		pin = s.Resolved
 	}
 	requests := d.requests
-	if target {
+	if target && !t.BoundByDependents {
 		// Explicit candidate policy is evaluated without dependent constraints.
 		requests = []Requirement{{Ref: Ref{Constraint: s.Version}}}
 	}
@@ -385,7 +391,7 @@ func (p *planner) candidates(name string, d *demand) ([]Release, error) {
 		}
 		return []Release{r}, nil
 	}
-	if pin != nil && !target && !p.movable[name] {
+	if pin != nil && !target && !p.pinMayMove(name, d) {
 		return nil, p.pinConflict(name, d)
 	}
 	overlap, _ := source.ConstraintsOverlap(constraints(requests))
@@ -433,7 +439,9 @@ func (p *planner) candidates(name string, d *demand) ([]Release, error) {
 		if pin == nil && t.Policy == Install {
 			return out, nil
 		}
-		p.locked[name] = r
+		if !t.BoundByDependents {
+			p.locked[name] = r
+		}
 		return []Release{r}, nil
 	}
 	return out, nil
@@ -478,8 +486,30 @@ func (p *planner) pinConflict(name string, d *demand) *ConflictError {
 		reason = EmptyIntersection
 	}
 	e := &ConflictError{Scope: p.scope, Name: name, Sources: keys(d.sources), Requests: sortedRequests(d.requests), Reason: reason}
-	if s := p.current.Skills[name]; s != nil && s.Resolved != nil && !p.movable[name] {
+	if s := p.current.Skills[name]; s != nil && s.Resolved != nil && !p.pinMayMove(name, d) {
 		e.Pinned = s.Resolved.Version
 	}
 	return e
+}
+
+// A changed installed parent supplies fixed requirements, like the original
+// manifest graph. New dependency choices still cannot displace compatible pins.
+func (p *planner) pinMayMove(name string, d *demand) bool {
+	if p.movable[name] {
+		return true
+	}
+	s := p.current.Skills[name]
+	if s == nil || s.Resolved == nil {
+		return false
+	}
+	for _, r := range d.requests {
+		if r.Manifest || r.Target || matches(s.Resolved.Version, []Requirement{r}) {
+			continue
+		}
+		parent := p.current.Skills[r.Requester]
+		if parent != nil && parent.Resolved != nil && parent.Resolved.Commit != r.Commit {
+			return true
+		}
+	}
+	return false
 }

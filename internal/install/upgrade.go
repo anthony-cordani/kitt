@@ -1,17 +1,27 @@
 package install
 
 import (
+	"bytes"
 	"fmt"
 	"io"
+	"slices"
 	"strconv"
 	"strings"
 
+	"github.com/anthony-cordani/kitt/internal/dependency"
 	"github.com/anthony-cordani/kitt/internal/manifest"
 	"github.com/anthony-cordani/kitt/internal/source"
+	"golang.org/x/mod/semver"
 )
 
-// Upgrade moves one skill (or all when name is "") to its newest version, showing what changes.
-func Upgrade(opts Options, name string, major bool) error {
+// Upgrade plans all requested releases together before applying any changes.
+func Upgrade(opts Options, name string, major bool) (err error) {
+	applying := false
+	defer func() {
+		if err != nil {
+			err = &dependency.PlanError{Err: err, ManagedStateUntouched: !applying}
+		}
+	}()
 	p, err := locate(opts)
 	if err != nil {
 		return err
@@ -23,33 +33,61 @@ func Upgrade(opts Options, name string, major bool) error {
 	if err := validateManifestNames(m); err != nil {
 		return err
 	}
-	p.installed, err = readInstalled(p, m)
+	names, err := upgradeTargets(m, p.manifest, name)
 	if err != nil {
 		return err
 	}
-	targets, err := upgradeTargets(m, p.manifest, name)
+	if err := prepareOwnership(&p, m); err != nil {
+		return err
+	}
+	access := &installSources{git: dependency.NewGitSources(m.Sources), current: m, opened: map[string]*source.Source{}, paths: p}
+	current, _, err := planningManifest(p, m, access)
 	if err != nil {
 		return err
 	}
-	out := outputOf(opts.Out)
-	opened := map[string]*source.Source{}
-	for _, skillName := range targets {
-		changed, err := upgradeOne(p, m, opened, out, skillName, major)
-		if err != nil {
-			return err
-		}
-		if changed {
-			if err := m.Save(p.manifest); err != nil {
-				return err
+	targets, notes, err := upgradePlanTargets(current, names, major, access)
+	if err != nil {
+		return err
+	}
+	plan, err := dependency.BuildPlan(dependency.Scope{Global: p.global, ManifestPath: p.manifest, Command: "upgrade"}, current, targets, access)
+	if err != nil {
+		return err
+	}
+	// Preserve the established caret-floor update for direct upgrade targets.
+	// Transitive entries keep their own (normally absent) manifest constraint.
+	for i := range plan.Nodes {
+		n := &plan.Nodes[i]
+		old := m.Skills[n.Name]
+		if n.Direct && slices.Contains(names, n.Name) && !exactPin(old.Version) {
+			n.Constraint = old.Version
+			if n.Version != "" && (old.Resolved == nil || old.Resolved.Commit != n.Commit) {
+				n.Constraint = "^" + n.Version
 			}
 		}
 	}
-	return finish(p, sortedNames(m.Skills), false, out)
+	// Prepare diffs before application as Git failures must leave state untouched.
+	var report bytes.Buffer
+	if err := reportUpgrade(&report, current, plan, names, notes, access); err != nil {
+		return err
+	}
+	out := outputOf(opts.Out)
+	_, applying, err = stageAndApplyPlan(p, m, plan, access, true, false, out)
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(out, &report)
+	return err
 }
 
 func upgradeTargets(m *manifest.Manifest, manifestPath, name string) ([]string, error) {
 	if name == "" {
-		return sortedNames(m.Skills), nil
+		var names []string
+		for _, n := range sortedNames(m.Skills) {
+			if m.Skills[n] != nil && m.Skills[n].IsDirect() {
+				names = append(names, n)
+			}
+		}
+		return names, nil
 	}
 	if _, ok := m.Skills[name]; !ok {
 		return nil, fmt.Errorf("skill %s is not in %s", name, manifestPath)
@@ -57,138 +95,107 @@ func upgradeTargets(m *manifest.Manifest, manifestPath, name string) ([]string, 
 	return []string{name}, nil
 }
 
-// upgradeOne upgrades a single manifest skill.
-// changed reports whether the manifest entry was updated.
-func upgradeOne(p paths, m *manifest.Manifest, opened map[string]*source.Source, out io.Writer, name string, major bool) (bool, error) {
-	sk := m.Skills[name]
-	if sk == nil {
-		return false, fmt.Errorf("skill %s: nil manifest entry", name)
-	}
-	src, err := fetchedSource(opened, m, sk.Source, name)
-	if err != nil {
-		return false, err
-	}
-	if exactPin(sk.Version) {
-		fmt.Fprintf(out, "kept %s %s (exact pin in kitt.toml)\n", name, sk.Version)
-		return false, nil
-	}
-	next, note, err := selectUpgrade(src, sk, name, major)
-	if err != nil {
-		return false, err
-	}
-	if note != "" {
-		fmt.Fprintln(out, note)
-	}
-	if sk.Resolved != nil && next.Commit == sk.Resolved.Commit {
-		fmt.Fprintf(out, "up to date %s %s\n", name, versionLabel(sk.Resolved.Version, sk.Resolved.Commit))
-		return false, nil
-	}
-	if sk.Resolved != nil {
-		diff, err := src.Diff(name, sk.Resolved.Commit, next.Commit)
-		if err != nil {
-			return false, fmt.Errorf("diff skill %s: %w", name, err)
-		}
-		fmt.Fprint(out, diff)
-	}
-	sum, err := installAt(p, name, next.Commit, "", src)
-	if err != nil {
-		return false, err
-	}
-	old := "-"
-	if sk.Resolved != nil {
-		old = versionLabel(sk.Resolved.Version, sk.Resolved.Commit)
-	}
-	sk.Resolved = &manifest.Resolved{
-		Version: next.Version,
-		Commit:  next.Commit,
-		Hash:    sum,
-	}
-	if next.Version != "" {
-		sk.Version = "^" + next.Version
-	}
-	fmt.Fprintf(out, "upgraded %s %s -> %s\n", name, old, versionLabel(next.Version, next.Commit))
-	return true, nil
-}
-
-// fetchedSource opens and fetches each alias at most once per run.
-func fetchedSource(opened map[string]*source.Source, m *manifest.Manifest, alias, name string) (*source.Source, error) {
-	if src, ok := opened[alias]; ok {
-		return src, nil
-	}
-	url, ok := m.Sources[alias]
-	if !ok {
-		return nil, fmt.Errorf("skill %s: unknown source %s", name, alias)
-	}
-	src, err := openFetch(alias, url)
-	if err != nil {
-		return nil, err
-	}
-	opened[alias] = src
-	return src, nil
-}
-
-// selectUpgrade picks the commit to move to.
-// note is the major-upgrade hint, empty when there is nothing to say.
-func selectUpgrade(src *source.Source, sk *manifest.Skill, name string, major bool) (source.Resolved, string, error) {
-	versions, err := src.Versions(name)
-	if err != nil {
-		return source.Resolved{}, "", fmt.Errorf("skill %s: %w", name, err)
-	}
-	if len(versions) == 0 {
-		resolved, err := src.Resolve(name, "")
-		if err != nil {
-			return source.Resolved{}, "", fmt.Errorf("resolve skill %s: %w", name, err)
-		}
-		return resolved, "", nil
-	}
-	latest := versions[len(versions)-1]
-	current := latest
-	if sk.Resolved != nil && sk.Resolved.Version != "" {
-		current = sk.Resolved.Version
-	} else if sk.Version != "" {
-		current = sk.Version
-	}
-	currentMajor, err := versionMajor(current)
-	if err != nil {
-		return source.Resolved{}, "", fmt.Errorf("skill %s: %w", name, err)
-	}
-	latestMajor, err := versionMajor(latest)
-	if err != nil {
-		return source.Resolved{}, "", fmt.Errorf("skill %s: %w", name, err)
-	}
-	sameMajor := highestMajor(versions, currentMajor)
-	note := ""
-	chosen := sameMajor
-	if latestMajor > currentMajor && !major {
-		note = fmt.Sprintf("note: %s %s is available (major upgrade, use --major)", name, latest)
-		chosen = sameMajor
-	} else if major {
-		chosen = latest
-	}
-	if chosen == "" {
-		return source.Resolved{}, "", fmt.Errorf("skill %s: no version with major %d", name, currentMajor)
-	}
-	if !major && (sk.Resolved == nil || sk.Resolved.Version == "") && sk.Version != "" {
-		chosen = sk.Version
-	}
-	resolved, err := src.Resolve(name, chosen)
-	if err != nil {
-		return source.Resolved{}, "", fmt.Errorf("resolve skill %s: %w", name, err)
-	}
-	return resolved, note, nil
-}
-
-// highestMajor is the last version in the ascending list whose major is want.
-func highestMajor(versions []string, want int) string {
-	found := ""
-	for _, v := range versions {
-		maj, err := versionMajor(v)
-		if err != nil || maj != want {
+func upgradePlanTargets(m *manifest.Manifest, names []string, major bool, access *installSources) ([]dependency.Target, map[string]string, error) {
+	var targets []dependency.Target
+	notes := map[string]string{}
+	for _, name := range names {
+		s := m.Skills[name]
+		if exactPin(s.Version) {
 			continue
 		}
-		found = v
+		t := dependency.Target{Name: name, Source: s.Source, Policy: dependency.Upgrade, PreserveDirect: true, BoundByDependents: !s.IsDirect()}
+		releases, err := access.Releases(s.Source, name)
+		if err != nil {
+			return nil, nil, err
+		}
+		latest := ""
+		for _, r := range releases {
+			if semver.Compare("v"+r.Version, "v"+latest) > 0 {
+				latest = r.Version
+			}
+		}
+		if major && s.IsDirect() && latest != "" {
+			// --major may replace the target's own range, never an incoming edge.
+			t.Constraint = "^" + latest
+		} else if s.IsDirect() && s.Version == "" && s.Resolved != nil && s.Resolved.Version != "" {
+			t.Constraint = "^" + s.Resolved.Version
+		}
+		constraint := t.Constraint
+		if constraint == "" {
+			constraint = s.Version
+		}
+		if !major && latest != "" && constraint != "" {
+			allowed, _ := source.Satisfies(constraint, latest)
+			currentMajor, _ := versionMajor(constraint)
+			latestMajor, _ := versionMajor(latest)
+			if !allowed && latestMajor > currentMajor {
+				notes[name] = fmt.Sprintf("note: %s %s is available (major upgrade, use --major)", name, latest)
+			}
+		}
+		targets = append(targets, t)
 	}
-	return found
+	return targets, notes, nil
+}
+
+func reportUpgrade(out io.Writer, current *manifest.Manifest, plan *dependency.Plan, names []string, notes map[string]string, access *installSources) error {
+	for _, n := range plan.Nodes {
+		old := current.Skills[n.Name]
+		requested := slices.Contains(names, n.Name)
+		if requested && exactPin(old.Version) {
+			fmt.Fprintf(out, "kept %s %s (exact pin in kitt.toml)\n", n.Name, old.Version)
+			continue
+		}
+		if note := notes[n.Name]; note != "" {
+			fmt.Fprintln(out, note)
+		}
+		if old != nil && old.Resolved != nil && old.Resolved.Commit == n.Commit {
+			if requested {
+				fmt.Fprintf(out, "up to date %s %s\n", n.Name, versionLabel(n.Version, n.Commit))
+			}
+		} else {
+			from := "-"
+			if old != nil && old.Resolved != nil {
+				from = versionLabel(old.Resolved.Version, old.Resolved.Commit)
+				src, err := access.exact(n.Source, n.Commit)
+				if err != nil {
+					return err
+				}
+				diff, err := src.Diff(n.Name, old.Resolved.Commit, n.Commit)
+				if err != nil {
+					return fmt.Errorf("diff skill %s: %w", n.Name, err)
+				}
+				fmt.Fprint(out, diff)
+			}
+			if old == nil {
+				fmt.Fprintf(out, "added dependency %s %s\n", n.Name, versionLabel(n.Version, n.Commit))
+			} else {
+				fmt.Fprintf(out, "upgraded %s %s -> %s\n", n.Name, from, versionLabel(n.Version, n.Commit))
+			}
+		}
+		var before []string
+		if old != nil && old.Resolved != nil && old.Resolved.Requires != nil {
+			for _, text := range *old.Resolved.Requires {
+				r, _ := dependency.ParseRef(text)
+				before = append(before, r.WithDefaultSource(old.Source).String())
+			}
+		}
+		slices.Sort(before)
+		before = slices.Compact(before)
+		for _, text := range before {
+			if !slices.Contains(n.Requires, text) {
+				fmt.Fprintf(out, "dependency removed %s -> %s\n", n.Name, text)
+			}
+		}
+		for _, text := range n.Requires {
+			if !slices.Contains(before, text) {
+				fmt.Fprintf(out, "dependency added %s -> %s\n", n.Name, text)
+			}
+		}
+	}
+	for _, name := range plan.Orphans {
+		fmt.Fprintf(out, "orphaned %s (retained)\n", name)
+	}
+	return nil
 }
 
 // exactPin reports whether v is an exact X.Y.Z constraint, with no caret.

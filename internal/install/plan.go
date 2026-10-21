@@ -2,6 +2,7 @@ package install
 
 import (
 	"fmt"
+	"io"
 	"maps"
 	"path/filepath"
 	"reflect"
@@ -99,18 +100,8 @@ func planAndInstall(opts Options, ref *string) (err error) {
 		}
 		targets = []dependency.Target{t}
 	}
-	p.installed, err = readInstalledWithMode(p, m, true)
-	if err != nil {
+	if err := prepareOwnership(&p, m); err != nil {
 		return err
-	}
-	// Preserve existing ownership diagnostics, and collect adoption only in memory.
-	for _, name := range sortedNames(m.Skills) {
-		if err := p.installed.adopt(name, m.Skills[name]); err != nil {
-			return err
-		}
-		if err := p.installed.check(name); err != nil {
-			return err
-		}
 	}
 	if len(targets) > 0 {
 		if err := p.installed.check(targets[0].Name); err != nil {
@@ -126,33 +117,10 @@ func planAndInstall(opts Options, ref *string) (err error) {
 	if err != nil {
 		return err
 	}
-	if err := preflightInstall(p, plan); err != nil {
-		return err
-	}
-	staged, cleanup, err := stagePlan(p, m, plan, access)
+	out := outputOf(opts.Out)
+	staged, applying, err := stageAndApplyPlan(p, m, plan, access, aware || ref != nil, ref == nil, out)
 	if err != nil {
 		return err
-	}
-	defer cleanup()
-	next := plannedManifest(m, plan, staged, aware || ref != nil)
-	applying = true
-	if err := applyStaged(p, plan, staged); err != nil {
-		return err
-	}
-	out := outputOf(opts.Out)
-	if err := finish(p, sortedNames(next.Skills), ref == nil, out); err != nil {
-		return err
-	}
-	p.installed.deferred = false
-	if p.installed.dirty {
-		if err := p.installed.save(); err != nil {
-			return err
-		}
-	}
-	if !reflect.DeepEqual(m, next) {
-		if err := next.Save(p.manifest); err != nil {
-			return err
-		}
 	}
 	for _, n := range plan.Nodes {
 		verb := "ok"
@@ -171,6 +139,57 @@ func planAndInstall(opts Options, ref *string) (err error) {
 		fmt.Fprintf(out, "orphaned %s (retained)\n", name)
 	}
 	return nil
+}
+
+// prepareOwnership collects migration/adoption in memory until the plan applies.
+func prepareOwnership(p *paths, m *manifest.Manifest) error {
+	var err error
+	p.installed, err = readInstalledWithMode(*p, m, true)
+	if err != nil {
+		return err
+	}
+	// Preserve existing ownership diagnostics, and collect adoption only in memory.
+	for _, name := range sortedNames(m.Skills) {
+		if err := p.installed.adopt(name, m.Skills[name]); err != nil {
+			return err
+		}
+		if err := p.installed.check(name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// stageAndApplyPlan is the shared install/restore/upgrade application path.
+// applying becomes true only after every graph and staging check succeeds.
+func stageAndApplyPlan(p paths, m *manifest.Manifest, plan *dependency.Plan, access *installSources, snapshots, prune bool, out io.Writer) (staged map[string]stagedSkill, applying bool, err error) {
+	if err := preflightInstall(p, plan); err != nil {
+		return nil, false, err
+	}
+	staged, cleanup, err := stagePlan(p, m, plan, access)
+	if err != nil {
+		return nil, false, err
+	}
+	defer cleanup()
+	next := plannedManifest(m, plan, staged, snapshots)
+	if err := applyStaged(p, plan, staged); err != nil {
+		return nil, true, err
+	}
+	if err := finish(p, sortedNames(next.Skills), prune, out); err != nil {
+		return nil, true, err
+	}
+	p.installed.deferred = false
+	if p.installed.dirty {
+		if err := p.installed.save(); err != nil {
+			return nil, true, err
+		}
+	}
+	if !reflect.DeepEqual(m, next) {
+		if err := next.Save(p.manifest); err != nil {
+			return nil, true, err
+		}
+	}
+	return staged, true, nil
 }
 
 func installTarget(m *manifest.Manifest, p paths, text string) (dependency.Target, error) {
