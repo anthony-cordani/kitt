@@ -89,6 +89,57 @@ func TestListLegacyFormatting(t *testing.T) {
 	}
 }
 
+func TestListNoDependencyEdgesMatchesMain(t *testing.T) {
+	for _, keys := range []string{"absent", "empty snapshots", "transitive flag only"} {
+		for _, missing := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/missing=%v", keys, missing), func(t *testing.T) {
+				project := healthyProject(t)
+				path := filepath.Join(project, "kitt.toml")
+				m := loadManifest(t, path)
+				s := m.Skills["review"]
+				s.Direct, s.Via, s.Resolved.Requires = nil, nil, nil
+				if keys != "absent" {
+					direct, requires := keys != "transitive flag only", []string{}
+					s.Direct, s.Via, s.Resolved.Requires = &direct, []string{}, &requires
+				}
+				if err := m.Save(path); err != nil {
+					t.Fatal(err)
+				}
+				// Golden strings from main's flat table, including available rows.
+				want := "Installed:\n  review  1.4.0  demo\nAvailable in demo:\n  review  1.4.0  installed\n"
+				if missing {
+					if err := os.RemoveAll(skillPath(project, "review")); err != nil {
+						t.Fatal(err)
+					}
+					want = "Installed:\n  review  not installed  demo\nAvailable in demo:\n  review  1.4.0  installed\n"
+				}
+				if got := mustList(t, project); got != want {
+					t.Fatalf("list = %q, want main's %q", got, want)
+				}
+			})
+		}
+	}
+}
+
+func TestListLegacyFrontmatterDependencyUsesTree(t *testing.T) {
+	f := dependencyScope(t, false)
+	dependencyRelease(t, f.repo, "leaf", "1.0.0")
+	dependencyRelease(t, f.repo, "root", "1.0.0", "leaf@^1")
+	f.add(t, "root")
+	m := loadManifest(t, f.path)
+	for _, s := range m.Skills {
+		s.Direct, s.Via, s.Resolved.Requires = nil, nil, nil
+	}
+	f.save(t, m)
+	const want = "Installed:\n" +
+		"  demo/leaf@1.0.0 [direct]\n" +
+		"  demo/root@1.0.0 (requested ^1.0.0)\n" +
+		"  `-- demo/leaf@1.0.0 (requires ^1) [direct] [already shown]\n"
+	if got := installedTree(t, f); got != want {
+		t.Fatalf("legacy dependency tree:\n%swant:\n%s", got, want)
+	}
+}
+
 func TestListMalformedGraphTerminates(t *testing.T) {
 	f := dependencyScope(t, false)
 	dependencyRelease(t, f.repo, "leaf", "1.0.0")

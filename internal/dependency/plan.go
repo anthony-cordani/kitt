@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/anthony-cordani/kitt/internal/manifest"
+	"github.com/anthony-cordani/kitt/internal/skill"
 	"github.com/anthony-cordani/kitt/internal/source"
 	"golang.org/x/mod/semver"
 )
@@ -37,7 +38,8 @@ type TipAccess interface {
 }
 
 // CandidatePolicy controls explicit targets. Install without a constraint retains
-// an existing pin (and promotes it). Upgrade selects the highest permitted release.
+// transitive pins on promotion and re-resolves direct pins. Upgrade selects the
+// highest permitted release.
 type CandidatePolicy string
 
 const (
@@ -47,7 +49,8 @@ const (
 
 // Target requests a direct skill. Source may be omitted for an existing entry or
 // a manifest with one source. Constraint replaces that entry's explicit constraint
-// when nonempty; otherwise the existing explicit constraint remains in force.
+// when nonempty. A no-range install re-resolves a direct entry; promotion keeps
+// a transitive entry's constraint and pin.
 // Callers can supply a caret constraint to limit an upgrade to a selected major.
 type Target struct {
 	Name, Source, Constraint string
@@ -58,6 +61,8 @@ type Target struct {
 	// BoundByDependents selects the highest candidate within incoming ranges,
 	// rather than proposing a candidate independently of those ranges.
 	BoundByDependents bool
+	// AllowMajor removes only the target's own caret range, retaining incoming ranges.
+	AllowMajor bool
 }
 
 // Node is the final pin and derived graph data. Requires is normalized, sorted,
@@ -115,7 +120,10 @@ func BuildPlan(scope Scope, current *manifest.Manifest, targets []Target, access
 			if p != nil {
 				explored = p.explored
 			}
-			planErr = &PlanError{Err: planErr, ManagedStateUntouched: true, ExploredStates: explored}
+			var access *AccessError
+			if !errors.As(planErr, &access) {
+				planErr = &PlanError{Err: planErr, ManagedStateUntouched: true, ExploredStates: explored}
+			}
 		}
 	}()
 	if current == nil {
@@ -155,8 +163,8 @@ func BuildPlan(scope Scope, current *manifest.Manifest, targets []Target, access
 func keys[V any](m map[string]V) []string { return slices.Sorted(maps.Keys(m)) }
 
 func (p *planner) validateName(alias, name string) error {
-	// Reuse the dependency reference validator, including its alias/path rules.
-	_, err := ParseRef(alias + "/" + name + "@0.0.0")
+	// Manifest and CLI aliases retain their legacy grammar.
+	err := skill.ValidName(name)
 	if err != nil {
 		return &ValidationError{Location: "manifest skill " + name, Err: err}
 	}
@@ -167,11 +175,6 @@ func (p *planner) validateName(alias, name string) error {
 }
 
 func (p *planner) prepare(targets []Target) error {
-	for _, alias := range keys(p.current.Sources) {
-		if _, err := ParseRef(alias + "/source-check@0.0.0"); err != nil {
-			return &ValidationError{Location: "source alias " + alias, Err: err}
-		}
-	}
 	for _, name := range keys(p.current.Skills) {
 		s := p.current.Skills[name]
 		if s == nil {
@@ -180,7 +183,7 @@ func (p *planner) prepare(targets []Target) error {
 		if err := p.validateName(s.Source, name); err != nil {
 			return err
 		}
-		if err := source.ValidateConstraint(s.Version); err != nil {
+		if err := source.ValidateConstraint(s.Version); err != nil && s.Resolved == nil {
 			return &ValidationError{Location: "manifest skill " + name + " version", Err: err}
 		}
 		if s.Resolved != nil {
@@ -194,7 +197,7 @@ func (p *planner) prepare(targets []Target) error {
 			}
 			if s.Resolved.Requires != nil {
 				n := Node{Name: name, Source: s.Source, Version: s.Resolved.Version, Commit: s.Resolved.Commit}
-				if _, err := p.normalize(n, *s.Resolved.Requires); err != nil {
+				if _, err := p.normalize(n, *s.Resolved.Requires, true); err != nil {
 					return err
 				}
 			}
@@ -232,15 +235,25 @@ func (p *planner) prepare(targets []Target) error {
 			return &ValidationError{Location: "target " + t.Name, Err: err}
 		}
 		if exists && s.Source != t.Source {
-			return &ConflictError{Scope: p.scope, Name: t.Name, Sources: []string{s.Source, t.Source}, Reason: SourceCollision,
-				Requests: []Requirement{{Ref: Ref{Source: s.Source, Name: t.Name, Constraint: s.Version}, Requester: t.Name, Source: s.Source, Manifest: true, Index: -1}, {Ref: Ref{Source: t.Source, Name: t.Name, Constraint: t.Constraint}, Requester: t.Name, Source: t.Source, Target: true, Index: -1}}}
+			// The final graph still contains every dependent's source requirement.
+			// A collision there blocks a switch; an unreferenced entry is replaceable.
+			s.Source, s.Version, s.Resolved = t.Source, "", nil
 		}
 		if !exists {
 			s = &manifest.Skill{Source: t.Source}
 			p.seeds[t.Name] = s
 		}
+		if t.AllowMajor || (t.Policy == Install && t.Constraint == "" && s.IsDirect()) {
+			s.Version = ""
+		}
 		if t.Constraint != "" {
 			s.Version = t.Constraint
+		}
+		if err := source.ValidateConstraint(s.Version); err != nil {
+			return &ValidationError{Location: "manifest skill " + t.Name + " version", Err: err}
+		}
+		if exists && s.IsDirect() && t.Policy == Install && t.Constraint == "" {
+			t.BoundByDependents = true
 		}
 		p.targets[t.Name] = t
 	}
@@ -248,30 +261,22 @@ func (p *planner) prepare(targets []Target) error {
 }
 
 // normalize uses Unit 1 parsing/grouping, preserving original indexes in errors.
-func (p *planner) normalize(n Node, raw []string) ([]string, error) {
-	refs := make([]Ref, 0, len(raw))
+func (p *planner) normalize(n Node, raw []string, snapshot bool) ([]string, error) {
+	out, err := NormalizeRequirements(raw, n.Source, snapshot)
+	if err != nil {
+		return nil, &ValidationError{Location: nodeRef(n), Err: err}
+	}
 	indexes := make(map[string]int)
 	for i, text := range raw {
-		r, err := ParseRef(text)
-		if err != nil {
-			return nil, &ValidationError{Location: fmt.Sprintf("%s metadata.requires[%d]", nodeRef(n), i), Err: err}
-		}
+		r, _ := ParseSnapshotRef(text)
 		r = r.WithDefaultSource(n.Source)
 		if _, ok := p.current.Sources[r.Source]; !ok {
 			return nil, &UnknownSourceError{Scope: p.scope, Alias: r.Source, Requirement: incoming(n, r, i)}
 		}
-		refs = append(refs, r)
 		if _, ok := indexes[r.String()]; !ok {
 			indexes[r.String()] = i
 		}
 	}
-	out := make([]string, 0, len(refs))
-	for _, group := range GroupRefs(refs, n.Source) {
-		for _, r := range group {
-			out = append(out, r.String())
-		}
-	}
-	slices.Sort(out)
 	p.indexes[nodeRef(n)] = indexes
 	return out, nil
 }
@@ -290,8 +295,10 @@ func incoming(n Node, ref Ref, index int) Requirement {
 
 func (p *planner) load(n Node) (Node, error) {
 	var raw []string
+	snapshot := false
 	if s := p.current.Skills[n.Name]; s != nil && s.Source == n.Source && s.Resolved != nil && s.Resolved.Commit == n.Commit && s.Resolved.Requires != nil {
 		raw = *s.Resolved.Requires
+		snapshot = true
 	} else {
 		key := n.Source + "/" + n.Name + "@" + n.Commit
 		if err := p.accessErrors["requires "+key]; err != nil {
@@ -320,7 +327,7 @@ func (p *planner) load(n Node) (Node, error) {
 		}
 	}
 	var err error
-	n.Requires, err = p.normalize(n, raw)
+	n.Requires, err = p.normalize(n, raw, snapshot)
 	return n, err
 }
 
@@ -399,7 +406,7 @@ func (p *planner) candidates(name string, d *demand) ([]Release, error) {
 		// Explicit candidate policy is evaluated without dependent constraints.
 		requests = []Requirement{{Ref: Ref{Constraint: s.Version}}}
 	}
-	if pin != nil && (!p.movable[name] || p.fixed[name]) && (!target || (t.Policy == Install && t.Constraint == "")) && matches(pin.Version, requests) {
+	if pin != nil && (!p.movable[name] || p.fixed[name]) && (!target || (t.Policy == Install && t.Constraint == "" && !s.IsDirect())) && matches(pin.Version, requests) {
 		r := Release{Version: pin.Version, Commit: pin.Commit}
 		if target {
 			p.locked[name] = r
@@ -408,6 +415,11 @@ func (p *planner) candidates(name string, d *demand) ([]Release, error) {
 	}
 	if pin != nil && !target && !p.pinMayMove(name, d) {
 		return nil, p.pinConflict(name, d)
+	}
+	if s != nil {
+		if err := source.ValidateConstraint(s.Version); err != nil {
+			return nil, &ValidationError{Location: "manifest skill " + name + " version", Err: err}
+		}
 	}
 	overlap, _ := source.ConstraintsOverlap(constraints(requests))
 	if !overlap {
@@ -454,9 +466,15 @@ func (p *planner) candidates(name string, d *demand) ([]Release, error) {
 		if pin == nil && t.Policy == Install {
 			return out, nil
 		}
-		if !t.BoundByDependents {
-			p.locked[name] = r
+		if t.BoundByDependents {
+			// A dependent selected later may narrow this domain. Retain lower
+			// candidates so search can reconsider it without lowering that parent.
+			if pin != nil && t.Policy == Upgrade && pin.Version != "" {
+				out = slices.DeleteFunc(out, func(candidate Release) bool { return semver.Compare("v"+candidate.Version, "v"+pin.Version) < 0 })
+			}
+			return out, nil
 		}
+		p.locked[name] = r
 		return []Release{r}, nil
 	}
 	return out, nil
@@ -479,7 +497,7 @@ func (p *planner) preparePins() error {
 			return err
 		}
 		for _, text := range n.Requires {
-			ref, _ := ParseRef(text)
+			ref, _ := ParseSnapshotRef(text)
 			if ref.Name == name {
 				return &CycleError{Path: []string{nodeRef(n), nodeRef(n)}}
 			}

@@ -204,7 +204,7 @@ func TestApplyTransactionRollbackAndRetry(t *testing.T) {
 					t.Fatalf("%s hook did not fire: %v", failure, err)
 				}
 				var pe *dependency.PlanError
-				if err == nil || !errors.As(err, &pe) || !pe.ManagedStateUntouched {
+				if err == nil || errors.As(err, &pe) {
 					t.Fatalf("rollback diagnostic: %v", err)
 				}
 				if after := transactionSnapshot(t, p); !reflect.DeepEqual(before, after) {
@@ -316,7 +316,7 @@ func TestFirstApplyRollbackAndRetry(t *testing.T) {
 			err := Add(opts, "root")
 			applyTestHook = nil
 			var pe *dependency.PlanError
-			if !fired || err == nil || !errors.As(err, &pe) || !pe.ManagedStateUntouched {
+			if !fired || err == nil || errors.As(err, &pe) {
 				t.Fatalf("error = %v", err)
 			}
 			if !reflect.DeepEqual(before, transactionSnapshot(t, p)) {
@@ -355,7 +355,7 @@ func TestFinishRollbackRestoresSymlinkedFileBytes(t *testing.T) {
 	err := Add(opts, "foo")
 	applyTestHook = nil
 	var pe *dependency.PlanError
-	if err == nil || !errors.As(err, &pe) || !pe.ManagedStateUntouched {
+	if err == nil || errors.As(err, &pe) {
 		t.Fatalf("rollback: %v", err)
 	}
 	data, err := os.ReadFile(target)
@@ -368,5 +368,58 @@ func TestFinishRollbackRestoresSymlinkedFileBytes(t *testing.T) {
 	}
 	if err := Add(opts, "foo"); err != nil {
 		t.Fatalf("retry: %v", err)
+	}
+}
+
+func TestJunctionBackupRollbackAndCleanupPreserveTarget(t *testing.T) {
+	p, _, _ := transactionFixture(t, false)
+	if err := os.MkdirAll(p.skillsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(p.claudeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p.installed = &installedState{dir: p.skillsDir, names: map[string]bool{}, deferred: true}
+	target := filepath.Join(p.skillsDir, "leaf")
+	testutil.WriteFile(t, filepath.Join(target, "content"), "must survive")
+	if err := createLink(p, filepath.Join(p.claudeDir, "leaf"), target, "leaf"); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := newApplyTransaction(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(p.claudeDir, "leaf")
+	if err := tx.moveAside(link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(link); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("link not moved: %v", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(target, "content")); err != nil || string(data) != "must survive" {
+		t.Fatalf("move changed target: %s, %v", data, err)
+	}
+	if err := createLink(p, link, target, "leaf"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if !sameDir(link, target) {
+		t.Fatal("link not restored")
+	}
+	// Removing a backup must also leave the linked directory's content intact.
+	tx, err = newApplyTransaction(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.moveAside(link); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeTree(tx.root); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(filepath.Join(target, "content")); err != nil || string(data) != "must survive" {
+		t.Fatalf("cleanup changed target: %s, %v", data, err)
 	}
 }

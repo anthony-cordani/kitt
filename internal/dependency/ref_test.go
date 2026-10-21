@@ -168,3 +168,17 @@ func mustParseRef(t *testing.T, s string) dependency.Ref {
 	}
 	return ref
 }
+
+func TestNormalizeRequirements(t *testing.T) {
+	got, err := dependency.NormalizeRequirements([]string{"z@^1", "team/a@^2", "a@^2", "z@^1"}, "team", false)
+	if err != nil || !reflect.DeepEqual(got, []string{"team/a@^2", "team/z@^1"}) {
+		t.Fatalf("%v, %v", got, err)
+	}
+	empty, err := dependency.NormalizeRequirements(nil, "team", false)
+	if err != nil || empty == nil || len(empty) != 0 {
+		t.Fatalf("leaf = %#v, %v", empty, err)
+	}
+	if _, err := dependency.NormalizeRequirements([]string{"a@^1", "bad"}, "team", false); err == nil || !strings.Contains(err.Error(), "metadata.requires[1]") {
+		t.Fatalf("index: %v", err)
+	}
+}

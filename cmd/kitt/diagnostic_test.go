@@ -45,6 +45,40 @@ func TestRunListDependencyTree(t *testing.T) {
 	}
 }
 
+func TestRunListAndDoctorNoDependenciesMatchMain(t *testing.T) {
+	testutil.IsolateHome(t)
+	project, repo := testutil.NewRepo(t), testutil.NewRepo(t)
+	testutil.Release(t, repo, "review", "1.4.0")
+	testutil.WriteFile(t, filepath.Join(project, "AGENTS.md"), "# Project\n")
+	path := filepath.Join(project, manifest.FileName)
+	testutil.WriteFile(t, path, fmt.Sprintf("[sources]\ndemo = %q\n", testutil.URL(repo)))
+	if err := install.Add(install.Options{Root: project, Out: io.Discard}, "review"); err != nil {
+		t.Fatal(err)
+	}
+	m, err := manifest.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := m.Skills["review"]
+	s.Direct, s.Via, s.Resolved.Requires = nil, nil, nil
+	if err := m.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(project)
+	var stdout, stderr bytes.Buffer
+	const wantList = "Installed:\n  review  1.4.0  demo\nAvailable in demo:\n  review  1.4.0  installed\n"
+	if code := run([]string{"list"}, &stdout, &stderr); code != 0 || stdout.String() != wantList || stderr.Len() != 0 {
+		t.Fatalf("list exit %d, stdout %q, stderr %q", code, stdout.String(), stderr.String())
+	}
+	if err := os.RemoveAll(filepath.Join(project, ".agents", "skills", "review")); err != nil {
+		t.Fatal(err)
+	}
+	const wantDoctor = "missing: review (run kitt install)\n1 problem(s)\n"
+	if code, stdout, stderr := runDoctor(); code != 2 || stdout != wantDoctor || stderr != "" {
+		t.Fatalf("doctor exit %d, stdout %q, stderr %q", code, stdout, stderr)
+	}
+}
+
 func TestRunDoctorDependencyExitCodesOfflineAndReadOnly(t *testing.T) {
 	for _, broken := range []bool{false, true} {
 		t.Run(fmt.Sprint(broken), func(t *testing.T) {

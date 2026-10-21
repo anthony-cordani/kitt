@@ -16,6 +16,7 @@ import (
 	"github.com/anthony-cordani/kitt/internal/dependency"
 	"github.com/anthony-cordani/kitt/internal/manifest"
 	"github.com/anthony-cordani/kitt/internal/skill"
+	"github.com/anthony-cordani/kitt/internal/source"
 	"github.com/anthony-cordani/kitt/internal/templates"
 )
 
@@ -88,20 +89,15 @@ func stagePlan(p paths, m *manifest.Manifest, plan *dependency.Plan, access *ins
 		if err := src.Extract(n.Name, n.Commit, dir); err != nil {
 			return nil, cleanup, fmt.Errorf("extract skill %s: %w", n.Name, err)
 		}
-		meta, err := skill.Validate(dir)
+		meta, err := source.ReadSkillMetadata(dir, n.Name)
 		if err != nil {
 			return nil, cleanup, fmt.Errorf("skill %s: %w", n.Name, err)
 		}
-		raw := make([]string, 0, len(meta.Requires))
-		for _, text := range meta.Requires {
-			r, err := dependency.ParseRef(text)
-			if err != nil {
-				return nil, cleanup, fmt.Errorf("skill %s: %w", n.Name, err)
-			}
-			raw = append(raw, r.WithDefaultSource(n.Source).String())
+		raw, err := dependency.NormalizeRequirements(meta.Requires, n.Source, false)
+		if err != nil {
+			return nil, cleanup, fmt.Errorf("skill %s: %w", n.Name, err)
 		}
-		slices.Sort(raw)
-		if !slices.Equal(slices.Compact(raw), n.Requires) {
+		if !slices.Equal(raw, n.Requires) {
 			return nil, cleanup, fmt.Errorf("skill %s: resolved.requires snapshot disagrees with pinned frontmatter", n.Name)
 		}
 		sum, err := skill.Hash(dir)
@@ -225,7 +221,7 @@ func applyStaged(p paths, plan *dependency.Plan, staged map[string]stagedSkill, 
 		}
 		done[name] = true // BuildPlan already ruled out cycles.
 		for _, text := range nodes[name].Requires {
-			r, _ := dependency.ParseRef(text)
+			r, _ := dependency.ParseSnapshotRef(text)
 			if err := apply(r.Name); err != nil {
 				return err
 			}
@@ -401,10 +397,6 @@ func (tx *applyTransaction) prepareFinish(p paths, names []string, prune bool, o
 			}
 		} else if err != nil {
 			return err
-		} else if sameDir(path, filepath.Join(p.skillsDir, name)) {
-			if err := tx.moveAside(path); err != nil {
-				return err
-			}
 		}
 	}
 	for name := range p.installed.names {
@@ -444,7 +436,7 @@ func (tx *applyTransaction) prepareFinish(p paths, names []string, prune bool, o
 		if active || p.installed.names[templates.BootstrapSkill] {
 			link := filepath.Join(p.claudeDir, templates.BootstrapSkill)
 			dest := filepath.Join(p.skillsDir, templates.BootstrapSkill)
-			if _, err := os.Lstat(link); errors.Is(err, fs.ErrNotExist) || sameDir(link, dest) {
+			if _, err := os.Lstat(link); errors.Is(err, fs.ErrNotExist) {
 				if err := tx.moveAside(link); err != nil {
 					return err
 				}
@@ -511,7 +503,7 @@ func (tx *applyTransaction) rollback() error {
 		moved := tx.moved[i]
 		err := applyStep("rollback", moved.path)
 		if err == nil {
-			err = os.RemoveAll(moved.path)
+			err = removeTree(moved.path)
 		}
 		if err == nil && moved.backup != "" {
 			err = os.Rename(moved.backup, moved.path)
@@ -536,8 +528,35 @@ func (tx *applyTransaction) rollback() error {
 	if len(failures) > 0 {
 		return fmt.Errorf("rollback incomplete; manual attention required: %s; backups retained in %s", strings.Join(failures, "; "), tx.root)
 	}
-	if err := os.RemoveAll(tx.root); err != nil {
+	if err := removeTree(tx.root); err != nil {
 		return fmt.Errorf("rollback restored managed files; manual attention required for backup directory %s: %w", tx.root, err)
 	}
 	return nil
+}
+
+// removeTree removes links (including junctions) as directory entries. It never
+// walks a junction target, even if a platform reports the junction as a directory.
+func removeTree(path string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := os.Readlink(path); err == nil {
+		return os.Remove(path)
+	}
+	if info.IsDir() {
+		entries, err := os.ReadDir(path)
+		if err != nil {
+			return err
+		}
+		for _, entry := range entries {
+			if err := removeTree(filepath.Join(path, entry.Name())); err != nil {
+				return err
+			}
+		}
+	}
+	return os.Remove(path)
 }

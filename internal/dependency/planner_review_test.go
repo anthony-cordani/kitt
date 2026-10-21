@@ -148,9 +148,11 @@ func TestPlannerExcludingSelfDependencyIsCycle(t *testing.T) {
 		m.Skills["a"] = pin("team", "1.0.0", "a", true, "a@^2")
 		var targets []dependency.Target
 		if targeted {
-			targets = []dependency.Target{target("a")}
+			targets = []dependency.Target{{Name: "a", Source: "team", Constraint: "1.0.0"}}
 		}
-		err := failure(t, m, targets, nil)
+		f := fake()
+		f.add("team/a", "1.0.0", "a@^2")
+		err := failure(t, m, targets, f)
 		var e *dependency.CycleError
 		if !errors.As(err, &e) || err.Error() != "dependency cycle: team/a@1.0.0 -> team/a@1.0.0" {
 			t.Fatal(err)
@@ -181,7 +183,7 @@ func TestPlannerInstallRefusalWording(t *testing.T) {
 		}
 		f := fake()
 		f.add("team/x", "2.0.0")
-		err := failure(t, m, []dependency.Target{target("x")}, f)
+		err := failure(t, m, []dependency.Target{{Name: "x", Source: "team", Constraint: "2.0.0"}}, f)
 		var e *dependency.UpgradeRefusalError
 		if !errors.As(err, &e) || !strings.HasPrefix(err.Error(), "cannot install team/x@2.0.0\n") {
 			t.Fatal(err)

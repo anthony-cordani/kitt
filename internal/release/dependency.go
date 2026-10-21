@@ -2,7 +2,10 @@ package release
 
 import (
 	"fmt"
+	"slices"
 	"strings"
+
+	"golang.org/x/mod/semver"
 
 	"github.com/anthony-cordani/kitt/internal/dependency"
 	"github.com/anthony-cordani/kitt/internal/source"
@@ -11,14 +14,21 @@ import (
 // releaseSources checks immediate requirements only. Enumerating publications
 // does not inspect their trees: the planner first selects matching candidates.
 type releaseSources struct {
-	root     string
-	urls     map[string]string
-	opened   map[string]*source.Source
-	versions map[string]string
+	root      string
+	urls      map[string]string
+	opened    map[string]*source.Source
+	versions  map[string]string
+	published map[string][]dependency.Release
 }
 
 func (s *releaseSources) Releases(alias, name string) ([]dependency.Release, error) {
 	key := alias + "/" + name
+	if releases, ok := s.published[key]; ok {
+		return releases, nil
+	}
+	// Keep this local: Source.PublishedReleases also checks every cached tag's
+	// skill presence. Release must check only matching candidates, and must use
+	// the selected remote's advertisement, including peeled annotated tags.
 	out, err := runGit(s.root, "ls-remote", "--tags", "--", s.urls[key], "refs/tags/"+name+"/v*")
 	if err != nil {
 		return nil, &dependency.AccessError{Source: alias, Name: name, Operation: "list published releases", Err: err}
@@ -43,6 +53,10 @@ func (s *releaseSources) Releases(alias, name string) ([]dependency.Release, err
 		releases = append(releases, dependency.Release{Version: version, Commit: object})
 		s.versions[key+"@"+object] = version
 	}
+	slices.SortFunc(releases, func(a, b dependency.Release) int {
+		return semver.Compare("v"+a.Version, "v"+b.Version)
+	})
+	s.published[key] = releases
 	return releases, nil
 }
 
@@ -62,6 +76,8 @@ func (s *releaseSources) Requires(alias, name, commit string) ([]string, error) 
 		s.opened[url] = src
 	}
 	version := s.versions[key+"@"+commit]
+	// Reuse source resolution for commit and skill-presence checks rather than
+	// introducing another reader of commit metadata here.
 	pin, err := src.Resolve(name, version)
 	if err != nil {
 		// A missing skill invalidates this candidate, allowing another matching

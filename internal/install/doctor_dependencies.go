@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"github.com/anthony-cordani/kitt/internal/dependency"
 	"github.com/anthony-cordani/kitt/internal/manifest"
@@ -17,6 +18,22 @@ import (
 // dependencies reads only the selected manifest and installed files. In particular,
 // it must never use planningManifest, which may obtain legacy metadata from Git.
 func (d *doctor) dependencies(m *manifest.Manifest, names []string) error {
+	inPlay := dependencyAware(m)
+	if !inPlay {
+		for _, name := range names {
+			if !d.verified[name] {
+				continue
+			}
+			meta, err := skill.ParseFile(filepath.Join(d.p.skillsDir, name, "SKILL.md"))
+			if len(meta.Requires) > 0 || err != nil && strings.Contains(err.Error(), "metadata.requires") {
+				inPlay = true
+				break
+			}
+		}
+	}
+	if !inPlay {
+		return nil
+	}
 	var nodes []dependency.Node
 	known := make(map[string]bool)
 	for _, name := range names {

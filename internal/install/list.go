@@ -34,12 +34,10 @@ func List(opts Options) error {
 	names := sortedNames(m.Skills)
 	if len(names) == 0 {
 		fmt.Fprintln(out, "  (none)")
-	} else if dependencyAware(m) {
+	} else {
 		if err := writeDependencyTree(out, p.skillsDir, m, names); err != nil {
 			return err
 		}
-	} else if err := writeInstalled(out, p.skillsDir, m.Skills, names); err != nil {
-		return err
 	}
 	aliases := make([]string, 0, len(m.Sources))
 	for alias := range m.Sources {
@@ -65,6 +63,7 @@ func dependencyAware(m *manifest.Manifest) bool {
 
 func writeDependencyTree(out io.Writer, skillsDir string, m *manifest.Manifest, names []string) error {
 	var nodes []dependency.Node
+	hasEdges := false
 	children := make(map[string][]dependency.Ref)
 	labels := make(map[string]string)
 	known := make(map[string]bool)
@@ -110,7 +109,12 @@ func writeDependencyTree(out io.Writer, skillsDir string, m *manifest.Manifest, 
 			r, _ := dependency.ParseRef(text)
 			children[name] = append(children[name], r)
 		}
+		hasEdges = hasEdges || len(n.Requires) > 0 || len(s.Via) > 0
 		nodes = append(nodes, n)
+	}
+	// Empty snapshots and direct flags alone do not change main's flat format.
+	if !hasEdges {
+		return writeInstalled(out, skillsDir, m.Skills, names)
 	}
 	graph := dependency.AnalyzeGraph(nodes)
 	shown := make(map[string]bool)

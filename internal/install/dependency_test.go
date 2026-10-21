@@ -183,6 +183,8 @@ func TestDependencyUnresolvedRestoreKeepsExistingPins(t *testing.T) {
 			dependencyRelease(t, f.repo, "shared", "1.0.0")
 			f.add(t, "shared")
 			old := *loadManifest(t, f.path).Skills["shared"].Resolved
+			leaf := []string{}
+			old.Requires = &leaf
 			dependencyRelease(t, f.repo, "shared", "1.9.0")
 			dependencyRelease(t, f.repo, "leaf", "1.0.0")
 			dependencyRelease(t, f.repo, "root", "1.0.0", "shared@^1", "leaf@^1")
@@ -352,8 +354,9 @@ func TestDependencyOrphanRetention(t *testing.T) {
 			f.add(t, "root@2.0.0")
 			f.restore(t)
 			leaf := loadManifest(t, f.path).Skills["leaf"]
-			if leaf == nil || leaf.IsDirect() || len(leaf.Via) != 0 || !reflect.DeepEqual(*leaf.Resolved, pin) {
-				t.Fatalf("orphan was removed/promoted/changed: %+v", leaf)
+			pin.Requires = nil
+			if leaf == nil || leaf.Direct != nil || len(leaf.Via) != 0 || !reflect.DeepEqual(*leaf.Resolved, pin) {
+				t.Fatalf("retained orphan must drop dependency keys with the last edge: %+v", leaf)
 			}
 			assertLinkResolves(t, claudePath(f.root, "leaf"), skillPath(f.root, "leaf"))
 		})
@@ -547,6 +550,8 @@ func TestRestoreBacktracksToKeepEveryPin(t *testing.T) {
 	dependencyRelease(t, f.repo, "root", "2.0.0", "leaf@^2")
 	m := loadManifest(t, f.path)
 	pin := *m.Skills["leaf"].Resolved
+	leaf := []string{}
+	pin.Requires = &leaf
 	m.Skills["root"] = &manifest.Skill{Source: "demo"}
 	f.save(t, m)
 	f.restore(t)
@@ -579,12 +584,11 @@ func TestAddEmptyConstraintAndUnchangedOutput(t *testing.T) {
 	if got := loadManifest(t, f.path).Skills["foo"].Resolved.Version; got != "2.0.0" {
 		t.Fatalf("got %s", got)
 	}
-	removeSourceAndCache(t, f.repo)
 	before := f.snapshot(t)
 	var out strings.Builder
 	f.opts.Out = &out
 	f.add(t, "foo")
-	if !strings.Contains(out.String(), "up to date foo 2.0.0") || strings.Contains(out.String(), "added foo") {
+	if !strings.Contains(out.String(), "added foo 2.0.0") || strings.Contains(out.String(), "up to date foo") {
 		t.Fatalf("output: %s", out.String())
 	}
 	assertSameTree(t, before, f.snapshot(t))

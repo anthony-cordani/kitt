@@ -4,6 +4,7 @@ package dependency
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"unicode"
 
@@ -111,4 +112,40 @@ func GroupRefs(refs []Ref, parentAlias string) [][]Ref {
 		groups[i] = append(groups[i], ref)
 	}
 	return groups
+}
+
+// NormalizeRequirements parses, qualifies, sorts and deduplicates requirements.
+// The returned slice is nonnil, including for a leaf. For a saved snapshot,
+// inherited aliases may already have been qualified by kitt; only frontmatter
+// aliases explicitly written by authors are restricted to the alias whitelist.
+func NormalizeRequirements(raw []string, parentAlias string, snapshot bool) ([]string, error) {
+	out := make([]string, 0, len(raw))
+	for i, text := range raw {
+		if snapshot && strings.HasPrefix(text, parentAlias+"/") {
+			text = strings.TrimPrefix(text, parentAlias+"/")
+		}
+		ref, err := ParseRef(text)
+		if err != nil {
+			return nil, &ValidationError{Location: fmt.Sprintf("metadata.requires[%d]", i), Err: err}
+		}
+		out = append(out, ref.WithDefaultSource(parentAlias).String())
+	}
+	slices.Sort(out)
+	return slices.Compact(out), nil
+}
+
+// ParseSnapshotRef reads a previously normalized requirement. Its source alias
+// may have been inherited from a legacy manifest, rather than authored in YAML.
+// Frontmatter must always use ParseRef instead.
+func ParseSnapshotRef(text string) (Ref, error) {
+	alias, rest, qualified := strings.Cut(text, "/")
+	if !qualified {
+		return ParseRef(text)
+	}
+	ref, err := ParseRef(rest)
+	if err != nil {
+		return Ref{}, err
+	}
+	ref.Source = alias
+	return ref, nil
 }

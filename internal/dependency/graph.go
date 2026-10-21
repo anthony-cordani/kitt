@@ -2,6 +2,7 @@ package dependency
 
 import (
 	"errors"
+	"github.com/anthony-cordani/kitt/internal/source"
 	"maps"
 	"slices"
 )
@@ -80,6 +81,11 @@ func (p *planner) graph(selected map[string]assignment) map[string]*demand {
 		if s.Resolved != nil {
 			r.Version, r.Commit = s.Resolved.Version, s.Resolved.Commit
 		}
+		if _, target := p.targets[name]; !target && s.Resolved != nil {
+			if source.ValidateConstraint(s.Version) != nil {
+				r.Ref.Constraint = ""
+			}
+		}
 		add(r)
 	}
 	visited := make(map[string]bool)
@@ -95,7 +101,7 @@ func (p *planner) graph(selected map[string]assignment) map[string]*demand {
 			continue
 		}
 		for i, text := range n.Requires {
-			ref, _ := ParseRef(text) // validated and normalized by load
+			ref, _ := ParseSnapshotRef(text) // validated and normalized by load
 			if indexes := p.indexes[nodeRef(n.Node)]; indexes != nil {
 				i = indexes[text]
 			}
@@ -110,7 +116,12 @@ func (p *planner) collision(name string, d *demand) error {
 	if len(d.sources) < 2 {
 		return nil
 	}
-	return &ConflictError{Scope: p.scope, Name: name, Sources: keys(d.sources), Requests: sortedRequests(d.origins), Reason: SourceCollision}
+	switched := false
+	if t, ok := p.targets[name]; ok {
+		old := p.current.Skills[name]
+		switched = old != nil && old.Source != t.Source
+	}
+	return &ConflictError{Scope: p.scope, Name: name, Sources: keys(d.sources), Requests: sortedRequests(d.origins), Reason: SourceCollision, SourceSwitch: switched}
 }
 
 func (p *planner) search(selected map[string]assignment) (map[string]assignment, error) {
@@ -122,7 +133,7 @@ func (p *planner) search(selected map[string]assignment) (map[string]assignment,
 	if err := cycle(selected); err != nil {
 		var names []string
 		for _, step := range err.(*CycleError).Path {
-			ref, _ := ParseRef(step)
+			ref, _ := ParseSnapshotRef(step)
 			names = append(names, ref.Name)
 		}
 		return nil, failureFor(err, names...)
@@ -253,6 +264,14 @@ func (p *planner) search(selected map[string]assignment) (map[string]assignment,
 		if !f.causes[name] {
 			return nil, f
 		}
+		if t, target := p.targets[name]; target && t.BoundByDependents {
+			var refusal *UpgradeRefusalError
+			if !errors.As(err, &refusal) || refusal.Name != name {
+				// Fallback is for a newly discovered incoming bound, not a way to
+				// lower a requested parent to evade a failure in its own closure.
+				return nil, f
+			}
+		}
 		if t, target := p.targets[name]; target && t.Policy == Install {
 			var conflict *ConflictError
 			if !errors.As(err, &conflict) || conflict.Pinned == "" {
@@ -298,7 +317,7 @@ func cycle(nodes map[string]assignment) error {
 		active[name] = len(stack)
 		stack = append(stack, name)
 		for _, text := range nodes[name].Requires {
-			r, _ := ParseRef(text)
+			r, _ := ParseSnapshotRef(text)
 			if err := visit(r.Name); err != nil {
 				return err
 			}
@@ -337,6 +356,12 @@ func (p *planner) plan(selected map[string]Node) *Plan {
 		}
 		if t, ok := p.targets[name]; ok && !t.PreserveDirect {
 			n.Direct = true
+		}
+		if t, ok := p.targets[name]; ok && t.Policy == Install && t.Constraint == "" && n.Version != "" {
+			old := p.current.Skills[name]
+			if old == nil || old.IsDirect() {
+				n.Constraint = "^" + n.Version
+			}
 		}
 		n.Via = graph.Via[name]
 		if n.Via == nil {
@@ -379,7 +404,7 @@ func AnalyzeGraph(nodes []Node) GraphInfo {
 		raw := n.Requires
 		n.Requires = nil
 		for _, text := range raw {
-			if r, err := ParseRef(text); err == nil {
+			if r, err := ParseSnapshotRef(text); err == nil {
 				n.Requires = append(n.Requires, r.WithDefaultSource(n.Source).String())
 			}
 		}
@@ -390,7 +415,7 @@ func AnalyzeGraph(nodes []Node) GraphInfo {
 	info := GraphInfo{Via: make(map[string][]string), Orphans: []string{}, Cycle: cycle(selected)}
 	for _, name := range keys(selected) {
 		for _, text := range selected[name].Requires {
-			r, _ := ParseRef(text)
+			r, _ := ParseSnapshotRef(text)
 			info.Via[r.Name] = append(info.Via[r.Name], name)
 		}
 	}
@@ -408,7 +433,7 @@ func AnalyzeGraph(nodes []Node) GraphInfo {
 		}
 		reachable[name] = true
 		for _, text := range selected[name].Requires {
-			r, _ := ParseRef(text)
+			r, _ := ParseSnapshotRef(text)
 			mark(r.Name)
 		}
 	}

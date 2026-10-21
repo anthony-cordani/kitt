@@ -98,7 +98,9 @@ func failure(t *testing.T, m *manifest.Manifest, targets []dependency.Target, f 
 		t.Fatalf("BuildPlan = %+v, %v; want nil plan and error", p, err)
 	}
 	var planning *dependency.PlanError
-	if !errors.As(err, &planning) || !planning.ManagedStateUntouched || strings.Contains(err.Error(), "no changes applied") {
+	var access *dependency.AccessError
+	isAccess := errors.As(err, &access)
+	if (isAccess && errors.As(err, &planning)) || (!isAccess && (!errors.As(err, &planning) || !planning.ManagedStateUntouched)) || strings.Contains(err.Error(), "no changes applied") {
 		t.Fatalf("missing untouched-state contract: %v", err)
 	}
 	after, _ := json.Marshal(m)
@@ -523,6 +525,8 @@ func TestPlannerDeterminismAcrossMapAndInputOrdering(t *testing.T) {
 		}
 		f := fake()
 		f.add("team/d", "1.2.0")
+		f.add("team/x", "1.0.0", "team/d@^1")
+		f.add("team/y", "1.0.0", "team/d@^1.2")
 		f.add("team/d", "1.9.0")
 		if i%2 == 0 {
 			slices.Reverse(f.releases["team/d"])

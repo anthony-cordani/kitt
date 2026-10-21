@@ -64,7 +64,7 @@ func Check(url string) error {
 
 // Fetch updates the cached clone from the remote.
 func (s *Source) Fetch() error {
-	if _, err := runGit("-C", s.dir, "fetch", "--quiet", "--prune", "--tags", "origin", "+refs/heads/*:refs/heads/*"); err != nil {
+	if _, err := runGit("-C", s.dir, "fetch", "--quiet", "--prune", "--tags", "origin", "+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*"); err != nil {
 		return err
 	}
 	out, err := runGit("-C", s.dir, "ls-remote", "--symref", "--", "origin", "HEAD")

@@ -21,14 +21,6 @@ func (s Scope) label() string {
 	return "project"
 }
 
-func (s Scope) prefix() string {
-	command := s.Command
-	if command == "" {
-		command = "install"
-	}
-	return "kitt " + command + ": "
-}
-
 // Requirement records an incoming edge or an explicit manifest/target constraint.
 // Index is the original zero-based metadata.requires index (-1 for manifest/target).
 type Requirement struct {
@@ -108,12 +100,13 @@ const (
 
 // ConflictError includes every currently selected requester, including manifest constraints.
 type ConflictError struct {
-	Scope    Scope
-	Name     string
-	Sources  []string
-	Requests []Requirement
-	Reason   ConflictReason
-	Pinned   string
+	Scope        Scope
+	Name         string
+	Sources      []string
+	Requests     []Requirement
+	Reason       ConflictReason
+	Pinned       string
+	SourceSwitch bool
 }
 
 func (e *ConflictError) Error() string {
@@ -123,7 +116,7 @@ func (e *ConflictError) Error() string {
 	if len(sources) > 0 {
 		name = sources[0] + "/" + name
 	}
-	text := e.Scope.prefix() + "incompatible requirements for " + name
+	text := "incompatible requirements for " + name
 	if e.Reason == SourceCollision {
 		quoted := make([]string, len(sources))
 		for i, alias := range sources {
@@ -144,6 +137,9 @@ func (e *ConflictError) Error() string {
 			lines += fmt.Sprintf("\n  %s requires %q", r.owner(), ref)
 		}
 	}
+	if e.SourceSwitch {
+		lines += "\n  source switch is blocked by dependents"
+	}
 	if e.Pinned != "" {
 		lines += fmt.Sprintf("\n  %s is pinned at %s; an explicit install or upgrade is required; use kitt upgrade %s", name, e.Pinned, e.Name)
 	}
@@ -162,7 +158,7 @@ func (e *UnknownSourceError) Error() string {
 	if path == "" {
 		path = "kitt.toml"
 	}
-	text := e.Scope.prefix() + fmt.Sprintf("unknown source alias %q", e.Alias)
+	text := fmt.Sprintf("unknown source alias %q", e.Alias)
 	if e.Requirement.Requester != "" {
 		text += fmt.Sprintf("\n  required by %s: %q", e.Requirement.owner(), e.Requirement.Ref.String())
 	}
@@ -232,7 +228,12 @@ type ValidationError struct {
 	Err      error
 }
 
-func (e *ValidationError) Error() string { return e.Location + ": " + e.Err.Error() }
+func (e *ValidationError) Error() string {
+	if e.Location == "" {
+		return e.Err.Error()
+	}
+	return e.Location + ": " + e.Err.Error()
+}
 func (e *ValidationError) Unwrap() error { return e.Err }
 
 // AccessError preserves source failures so callers can distinguish Git access
@@ -247,7 +248,7 @@ func (e *AccessError) Error() string {
 }
 func (e *AccessError) Unwrap() error { return e.Err }
 
-// PlanError wraps every BuildPlan failure. ManagedStateUntouched describes only
+// PlanError wraps planning and validation failures. ManagedStateUntouched describes only
 // the planner: callers must separately account for their own preceding writes.
 // Error text deliberately leaves any "no changes applied" claim to the caller.
 type PlanError struct {

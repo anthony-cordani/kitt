@@ -159,61 +159,6 @@ func openFetch(alias, url string) (*source.Source, error) {
 	return src, nil
 }
 
-// installAt extracts commit into the skills directory.
-// expected is checked when non-empty. The returned hash is the installed tree.
-func installAt(p paths, name, commit, expected string, src *source.Source) (string, error) {
-	// ValidName before the name is joined onto a path.
-	if err := skill.ValidName(name); err != nil {
-		return "", err
-	}
-	if err := p.installed.check(name); err != nil {
-		return "", err
-	}
-	skillsDir := p.skillsDir
-	if err := os.MkdirAll(skillsDir, 0o755); err != nil {
-		return "", fmt.Errorf("create skills dir: %w", err)
-	}
-	dest := filepath.Join(skillsDir, name)
-	tmp := filepath.Join(skillsDir, tempPrefix+name)
-	if err := os.RemoveAll(tmp); err != nil {
-		return "", fmt.Errorf("remove temp dir: %w", err)
-	}
-	if err := src.Extract(name, commit, tmp); err != nil {
-		os.RemoveAll(tmp)
-		return "", fmt.Errorf("extract skill %s: %w", name, err)
-	}
-	meta, err := skill.ParseFile(filepath.Join(tmp, "SKILL.md"))
-	if err != nil {
-		os.RemoveAll(tmp)
-		return "", fmt.Errorf("skill %s: %w", name, err)
-	}
-	if meta.Name != name {
-		os.RemoveAll(tmp)
-		return "", fmt.Errorf("skill %s: SKILL.md declares name %s", name, meta.Name)
-	}
-	sum, err := skill.Hash(tmp)
-	if err != nil {
-		os.RemoveAll(tmp)
-		return "", fmt.Errorf("skill %s: %w", name, err)
-	}
-	if expected != "" && sum != expected {
-		os.RemoveAll(tmp)
-		return "", fmt.Errorf("skill %s: hash mismatch (kitt.toml pins %s, source gives %s)", name, expected, sum)
-	}
-	if err := os.RemoveAll(dest); err != nil {
-		os.RemoveAll(tmp)
-		return "", fmt.Errorf("remove skill %s: %w", name, err)
-	}
-	if err := os.Rename(tmp, dest); err != nil {
-		os.RemoveAll(tmp)
-		return "", fmt.Errorf("install skill %s: %w", name, err)
-	}
-	if err := p.installed.add(name); err != nil {
-		return "", err
-	}
-	return sum, nil
-}
-
 func hashMatches(dest, want string) (bool, error) {
 	info, err := os.Lstat(dest)
 	if err != nil {
@@ -230,21 +175,6 @@ func hashMatches(dest, want string) (bool, error) {
 		return false, fmt.Errorf("hash skill %s: %w", filepath.Base(dest), err)
 	}
 	return got == want, nil
-}
-
-// parseRef splits "[source/]skill[@constraint]" on the first '/' and the first '@'.
-func parseRef(ref string) (alias, name, constraint string) {
-	rest := ref
-	if i := strings.Index(ref, "/"); i >= 0 {
-		alias = ref[:i]
-		rest = ref[i+1:]
-	}
-	name = rest
-	if i := strings.Index(rest, "@"); i >= 0 {
-		name = rest[:i]
-		constraint = rest[i+1:]
-	}
-	return alias, name, constraint
 }
 
 func versionLabel(version, commit string) string {
@@ -322,6 +252,7 @@ func createLink(p paths, link, dest, name string) error {
 			return err
 		}
 		cmd := exec.Command("cmd", "/c", "mklink", "/J", link, abs)
+		configureJunctionCommand(cmd, link, abs)
 		msg, err := cmd.CombinedOutput()
 		if err != nil {
 			text := strings.TrimSpace(string(msg))
@@ -578,4 +509,10 @@ func validateJunctionPaths(link, target string) error {
 		return fmt.Errorf("cannot create a junction for a path containing one of & | < > ^ %% ! \"")
 	}
 	return nil
+}
+
+// cmd.exe treats '=' as a separator in unquoted arguments. Quote both native,
+// absolute paths even when Go's ordinary argument quoting would omit quotes.
+func junctionCommandLine(link, target string) string {
+	return fmt.Sprintf(`cmd /c mklink /J "%s" "%s"`, link, target)
 }

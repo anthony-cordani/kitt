@@ -42,6 +42,19 @@ func TestParseFileRequirements(t *testing.T) {
 	}
 }
 
+func TestParseFileUnquotedRequirementStrings(t *testing.T) {
+	for _, ending := range []string{"\n", "\r\n"} {
+		t.Run(fmt.Sprintf("%q", ending), func(t *testing.T) {
+			const doc = "---\nname: review\ndescription: Review code.\nmetadata:\n  requires:\n    - code-review@^1.0.0\n    - team/review@^1\n---\n"
+			meta := parseSkill(t, strings.ReplaceAll(doc, "\n", ending))
+			want := []string{"code-review@^1.0.0", "team/review@^1"}
+			if !reflect.DeepEqual(meta.Requires, want) {
+				t.Fatalf("unquoted requirements = %#v, want %#v", meta.Requires, want)
+			}
+		})
+	}
+}
+
 func TestParseFileRejectsNonStringVersion(t *testing.T) {
 	for _, ending := range []string{"\n", "\r\n"} {
 		t.Run(fmt.Sprintf("%q", ending), func(t *testing.T) {

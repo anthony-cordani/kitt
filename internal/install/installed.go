@@ -23,10 +23,6 @@ type installedState struct {
 	dirty    bool
 }
 
-func readInstalled(p paths, m *manifest.Manifest) (*installedState, error) {
-	return readInstalledWithMode(p, m, false)
-}
-
 // Deferred reads and adoption collect ownership evidence without writing state.
 // Install/restore flush it only after the entire graph and staged content validate.
 func readInstalledWithMode(p paths, m *manifest.Manifest, deferred bool) (*installedState, error) {

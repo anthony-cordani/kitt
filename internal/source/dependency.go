@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/anthony-cordani/kitt/internal/skill"
 )
@@ -18,39 +17,15 @@ func (s *Source) BranchTip(name string) (Resolved, error) {
 	return s.resolveDegraded(name)
 }
 
-// PublishedReleases returns cached release pins whose tag objects are still
-// advertised by this source's origin. Cache-only/local tags do not count.
-// Call Fetch first when fresh remote candidates are needed.
+// PublishedReleases returns the cache's published tags. Call Fetch once before
+// resolving candidates: kitt never creates tags in this remote clone.
 func (s *Source) PublishedReleases(name string) ([]Resolved, error) {
 	versions, err := s.Versions(name)
 	if err != nil {
 		return nil, err
 	}
-	out, err := runGit("-C", s.dir, "ls-remote", "--tags", "--refs", "--", "origin", "refs/tags/"+name+"/v*")
-	if err != nil {
-		return nil, err
-	}
-	advertised := make(map[string]string)
-	for _, line := range strings.Split(string(out), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) == 2 {
-			advertised[fields[1]] = fields[0]
-		}
-	}
 	releases := make([]Resolved, 0, len(versions))
 	for _, version := range versions {
-		ref := "refs/tags/" + name + "/v" + version
-		object, ok := advertised[ref]
-		if !ok {
-			continue
-		}
-		cached, err := s.revParse(ref)
-		if err != nil {
-			return nil, err
-		}
-		if cached != object {
-			return nil, fmt.Errorf("published tag %q changed; refresh source %q", ref, s.Alias)
-		}
 		pin, err := s.pin(name, version)
 		if err != nil {
 			return nil, err
@@ -58,6 +33,25 @@ func (s *Source) PublishedReleases(name string) ([]Resolved, error) {
 		releases = append(releases, pin)
 	}
 	return releases, nil
+}
+
+// MetadataError distinguishes malformed skill content from source access errors.
+type MetadataError struct{ Err error }
+
+func (e *MetadataError) Error() string { return e.Err.Error() }
+func (e *MetadataError) Unwrap() error { return e.Err }
+
+// ReadSkillMetadata matches installation's parse-and-name validation. A missing
+// description is permitted for installed skills, including legacy releases.
+func ReadSkillMetadata(dir, name string) (skill.Meta, error) {
+	meta, err := skill.ParseFile(filepath.Join(dir, "SKILL.md"))
+	if err == nil && meta.Name != name {
+		err = fmt.Errorf("SKILL.md declares name %s", meta.Name)
+	}
+	if err != nil {
+		return skill.Meta{}, &MetadataError{Err: err}
+	}
+	return meta, nil
 }
 
 // Requires reads validated metadata from the supplied commit, never HEAD.
@@ -71,7 +65,7 @@ func (s *Source) Requires(name, commit string) ([]string, error) {
 	if err := s.Extract(name, commit, dest); err != nil {
 		return nil, err
 	}
-	meta, err := skill.Validate(dest)
+	meta, err := ReadSkillMetadata(dest, name)
 	if err != nil {
 		return nil, err
 	}

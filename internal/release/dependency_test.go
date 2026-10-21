@@ -83,14 +83,14 @@ func TestReleaseRequirementFailuresLeaveTagsUnchanged(t *testing.T) {
 		{name: "no published release", ref: "helper@^1", want: "helper has no published releases; a branch-tip pin cannot satisfy this range", kind: "no releases", setup: func(t *testing.T, repo string) {
 			testutil.WriteSkillRequires(t, repo, "helper", "1.2.3", nil)
 		}},
-		{name: "no matching release", ref: "helper@^2", want: "ranges overlap, but no published release matches", kind: "conflict", setup: func(t *testing.T, repo string) {
+		{name: "no matching release", ref: "helper@^2", want: "no published release of origin/helper matches ^2", kind: "conflict", setup: func(t *testing.T, repo string) {
 			testutil.Release(t, repo, "helper", "1.2.3")
 			testutil.Git(t, repo, "push", "origin", "refs/tags/helper/v1.2.3")
 		}},
 		{name: "local-only tag", ref: "helper@^1", want: "helper has no published releases", kind: "no releases", setup: func(t *testing.T, repo string) {
 			testutil.Release(t, repo, "helper", "1.2.3")
 		}},
-		{name: "local matching tag and published nonmatching tag", ref: "helper@^2", want: "ranges overlap, but no published release matches", kind: "conflict", setup: func(t *testing.T, repo string) {
+		{name: "local matching tag and published nonmatching tag", ref: "helper@^2", want: "no published release of origin/helper matches ^2", kind: "conflict", setup: func(t *testing.T, repo string) {
 			testutil.Release(t, repo, "helper", "1.2.3")
 			testutil.Git(t, repo, "push", "origin", "refs/tags/helper/v1.2.3")
 			testutil.Release(t, repo, "helper", "2.0.0")
@@ -129,7 +129,7 @@ func TestReleaseRequirementFailuresLeaveTagsUnchanged(t *testing.T) {
 			case "alias":
 				var e *dependency.UnknownSourceError
 				root := testutil.Git(t, repo, "rev-parse", "--show-toplevel")
-				if !errors.As(err, &e) || e.Scope.ManifestPath != filepath.Join(root, manifest.FileName) || !strings.Contains(err.Error(), `kitt init --source "other=<repository-url>"`) {
+				if !errors.As(err, &e) || e.Scope.ManifestPath != filepath.Join(root, manifest.FileName) || !strings.Contains(err.Error(), `add [sources].other = "<repository-url>" to `+filepath.Join(root, manifest.FileName)+` at the skills repository root`) || strings.Contains(err.Error(), "kitt init") {
 					t.Fatalf("missing alias recovery context: %v", err)
 				}
 			case "no releases":
@@ -167,6 +167,80 @@ func TestReleaseRequirementsUseSelectedRemotePublication(t *testing.T) {
 	originBefore := remoteTags(t, repo, "origin")
 	requireReleaseFailureWithoutTags(t, repo, "upstream", "helper has no published releases")
 	requireRemoteTags(t, repo, "origin", originBefore)
+}
+
+func TestReleaseRejectsReservedRequirementNames(t *testing.T) {
+	for _, ref := range []string{"kitt-helper@^1", "team/kitt-helper@^1"} {
+		t.Run(ref, func(t *testing.T) {
+			testutil.IsolateHome(t)
+			repo, _ := newPushedSkillRepo(t, "origin", "1.0.0")
+			pushRequirements(t, repo, "origin", []string{ref})
+			err := requireReleaseFailureWithoutTags(t, repo, "origin", "skill kitt-helper: skill names starting with kitt- are reserved")
+			var validation *dependency.ValidationError
+			if !errors.As(err, &validation) || !strings.Contains(err.Error(), "metadata.requires[0]") {
+				t.Fatalf("missing requirement location: %v", err)
+			}
+		})
+	}
+}
+
+func TestReleaseUnknownAliasRecoveryText(t *testing.T) {
+	testutil.IsolateHome(t)
+	repo, _ := newPushedSkillRepo(t, "origin", "1.0.0")
+	pushRequirements(t, repo, "origin", []string{"team/helper@^1"})
+	err := requireReleaseFailureWithoutTags(t, repo, "origin", `unknown source alias "team"`)
+	root := testutil.Git(t, repo, "rev-parse", "--show-toplevel")
+	want := "unknown source alias \"team\"\n" +
+		"  required by origin/review@1.0.0: \"team/helper@^1\"\n" +
+		"  add [sources].team = \"<repository-url>\" to " + filepath.Join(root, manifest.FileName) + " at the skills repository root\n" +
+		"  no release tag created"
+	if err.Error() != want {
+		t.Fatalf("alias error:\n%s\nwant:\n%s", err, want)
+	}
+}
+
+func TestReleaseUnmatchedRangeExactText(t *testing.T) {
+	testutil.IsolateHome(t)
+	repo, _ := newPushedSkillRepo(t, "origin", "1.0.0")
+	// Both lightweight and annotated tags count; print them in version order.
+	for _, version := range []string{"2.0.0", "1.0.0", "1.1.0"} {
+		testutil.Release(t, repo, "helper", version)
+		if version == "1.1.0" {
+			testutil.Git(t, repo, "tag", "-f", "-a", "helper/v"+version, "-m", "annotated release")
+		}
+		testutil.Git(t, repo, "push", "origin", "refs/tags/helper/v"+version)
+	}
+	// Neither an unpublished matching tag nor non-release tags appear.
+	testutil.Release(t, repo, "helper", "3.0.0")
+	testutil.Git(t, repo, "tag", "helper/v4.0.0-rc.1")
+	testutil.Git(t, repo, "push", "origin", "refs/tags/helper/v4.0.0-rc.1")
+	pushRequirements(t, repo, "origin", []string{"helper@^3.0.0"})
+	err := requireReleaseFailureWithoutTags(t, repo, "origin", "no published release of origin/helper matches ^3.0.0")
+	const want = "no published release of origin/helper matches ^3.0.0\n" +
+		"  required by origin/review@1.0.0\n" +
+		"  published: 1.0.0, 1.1.0, 2.0.0\n" +
+		"  no release tag created"
+	if err.Error() != want {
+		t.Fatalf("unmatched range error:\n%s\nwant:\n%s", err, want)
+	}
+}
+
+func TestReleaseConflictingRangesExactText(t *testing.T) {
+	testutil.IsolateHome(t)
+	repo, _ := newPushedSkillRepo(t, "origin", "1.0.0")
+	testutil.Release(t, repo, "helper", "1.0.0")
+	testutil.Release(t, repo, "helper", "2.0.0")
+	testutil.Git(t, repo, "push", "origin", "--tags")
+	pushRequirements(t, repo, "origin", []string{"helper@^1", "helper@^2"})
+	err := requireReleaseFailureWithoutTags(t, repo, "origin", "incompatible requirements")
+	const want = "incompatible requirements for origin/helper\n" +
+		"  origin/review@1.0.0 requires ^1 (metadata.requires[0])\n" +
+		"  origin/review@1.0.0 requires ^2 (metadata.requires[1])\n" +
+		"  one version per skill name is allowed in release scope\n" +
+		"  no release tag created"
+	if err.Error() != want {
+		t.Fatalf("conflict error:\n%s\nwant:\n%s", err, want)
+	}
 }
 
 func writeReleaseSources(t *testing.T, repo string, aliases map[string]string) {

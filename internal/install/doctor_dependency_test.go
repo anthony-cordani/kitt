@@ -258,6 +258,35 @@ func TestDoctorLegacyUnavailableIsIncomplete(t *testing.T) {
 	}
 }
 
+func TestDoctorNoDependencyKeysMatchesMain(t *testing.T) {
+	for _, state := range []string{"healthy", "missing", "modified"} {
+		t.Run(state, func(t *testing.T) {
+			project := healthyProject(t)
+			path := filepath.Join(project, manifest.FileName)
+			m := loadManifest(t, path)
+			s := m.Skills["review"]
+			s.Direct, s.Via, s.Resolved.Requires = nil, nil, nil
+			if err := m.Save(path); err != nil {
+				t.Fatal(err)
+			}
+			wantCount, want := 0, "ok\n"
+			switch state {
+			case "missing":
+				if err := os.RemoveAll(skillPath(project, "review")); err != nil {
+					t.Fatal(err)
+				}
+				wantCount, want = 1, "missing: review (run kitt install)\n1 problem(s)\n"
+			case "modified":
+				testutil.WriteFile(t, filepath.Join(skillPath(project, "review"), "LOCAL.md"), "local\n")
+				wantCount, want = 1, "modified: review (local changes; kitt install restores the pinned version)\n1 problem(s)\n"
+			}
+			if n, out := mustDoctor(t, project); n != wantCount || out != want {
+				t.Fatalf("doctor = %d, %q; want main's %d, %q", n, out, wantCount, want)
+			}
+		})
+	}
+}
+
 func TestDoctorOfflineReadOnlyIncludesHomeAndOwnershipMigration(t *testing.T) {
 	for _, global := range []bool{false, true} {
 		t.Run(fmt.Sprint(global), func(t *testing.T) {

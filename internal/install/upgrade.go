@@ -2,6 +2,7 @@ package install
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"slices"
@@ -16,12 +17,7 @@ import (
 
 // Upgrade plans all requested releases together before applying any changes.
 func Upgrade(opts Options, name string, major bool) (err error) {
-	applying := false
-	defer func() {
-		if err != nil {
-			err = &dependency.PlanError{Err: err, ManagedStateUntouched: !applying}
-		}
-	}()
+	defer func() { err = installError(err) }()
 	p, err := locate(opts)
 	if err != nil {
 		return err
@@ -38,10 +34,10 @@ func Upgrade(opts Options, name string, major bool) (err error) {
 		return err
 	}
 	if err := prepareOwnership(&p, m); err != nil {
-		return err
+		return validationError(err)
 	}
-	access := &installSources{git: dependency.NewGitSources(m.Sources), current: m, opened: map[string]*source.Source{}, paths: p}
-	current, _, err := planningManifest(p, m, access)
+	access := &installSources{current: m, opened: map[string]*source.Source{}, paths: p}
+	current, err := planningManifest(p, m, access)
 	if err != nil {
 		return err
 	}
@@ -49,7 +45,7 @@ func Upgrade(opts Options, name string, major bool) (err error) {
 	if err != nil {
 		return err
 	}
-	plan, err := dependency.BuildPlan(dependency.Scope{Global: p.global, ManifestPath: p.manifest, Command: "upgrade"}, current, targets, access)
+	plan, err := buildUpgradePlan(p, current, targets, access, name == "")
 	if err != nil {
 		return err
 	}
@@ -65,13 +61,49 @@ func Upgrade(opts Options, name string, major bool) (err error) {
 			}
 		}
 	}
+	if major {
+		for _, n := range plan.Nodes {
+			if !slices.Contains(names, n.Name) || exactPin(m.Skills[n.Name].Version) {
+				continue
+			}
+			releases, err := access.Releases(n.Source, n.Name)
+			if err != nil {
+				return err
+			}
+			latest := ""
+			for _, r := range releases {
+				if semver.Compare("v"+r.Version, "v"+latest) > 0 {
+					latest = r.Version
+				}
+			}
+			if latest == "" || semver.Compare("v"+latest, "v"+n.Version) <= 0 {
+				continue
+			}
+			var blockers []string
+			for _, parent := range plan.Nodes {
+				for _, text := range parent.Requires {
+					ref, _ := dependency.ParseSnapshotRef(text)
+					if ref.Source != n.Source || ref.Name != n.Name {
+						continue
+					}
+					ok, _ := source.Satisfies(ref.Constraint, latest)
+					if !ok {
+						blockers = append(blockers, fmt.Sprintf("%s %s is available but %s/%s@%s requires %s", n.Name, latest, parent.Source, parent.Name, versionLabel(parent.Version, parent.Commit), ref.Constraint))
+					}
+				}
+			}
+			if len(blockers) > 0 {
+				notes[n.Name] = strings.Join(blockers, "\n")
+			}
+		}
+	}
 	// Prepare diffs before application as Git failures must leave state untouched.
 	var report bytes.Buffer
 	if err := reportUpgrade(&report, current, plan, names, notes, access); err != nil {
 		return err
 	}
 	out := outputOf(opts.Out)
-	_, applying, err = stageAndApplyPlan(p, m, plan, access, true, false, out)
+	_, err = stageAndApplyPlan(p, m, plan, access, false, out)
 	if err != nil {
 		return err
 	}
@@ -83,7 +115,7 @@ func upgradeTargets(m *manifest.Manifest, manifestPath, name string) ([]string, 
 	if name == "" {
 		var names []string
 		for _, n := range sortedNames(m.Skills) {
-			if m.Skills[n] != nil && m.Skills[n].IsDirect() {
+			if m.Skills[n] != nil {
 				names = append(names, n)
 			}
 		}
@@ -100,6 +132,9 @@ func upgradePlanTargets(m *manifest.Manifest, names []string, major bool, access
 	notes := map[string]string{}
 	for _, name := range names {
 		s := m.Skills[name]
+		if err := source.ValidateConstraint(s.Version); err != nil {
+			return nil, nil, &dependency.ValidationError{Location: "skills." + name + ".version", Err: err}
+		}
 		if exactPin(s.Version) {
 			continue
 		}
@@ -116,7 +151,7 @@ func upgradePlanTargets(m *manifest.Manifest, names []string, major bool, access
 		}
 		if major && s.IsDirect() && latest != "" {
 			// --major may replace the target's own range, never an incoming edge.
-			t.Constraint = "^" + latest
+			t.AllowMajor = true
 		} else if s.IsDirect() && s.Version == "" && s.Resolved != nil && s.Resolved.Version != "" {
 			t.Constraint = "^" + s.Resolved.Version
 		}
@@ -174,13 +209,12 @@ func reportUpgrade(out io.Writer, current *manifest.Manifest, plan *dependency.P
 		}
 		var before []string
 		if old != nil && old.Resolved != nil && old.Resolved.Requires != nil {
-			for _, text := range *old.Resolved.Requires {
-				r, _ := dependency.ParseRef(text)
-				before = append(before, r.WithDefaultSource(old.Source).String())
+			var err error
+			before, err = dependency.NormalizeRequirements(*old.Resolved.Requires, old.Source, true)
+			if err != nil {
+				return err
 			}
 		}
-		slices.Sort(before)
-		before = slices.Compact(before)
 		for _, text := range before {
 			if !slices.Contains(n.Requires, text) {
 				fmt.Fprintf(out, "dependency removed %s -> %s\n", n.Name, text)
@@ -238,4 +272,27 @@ func versionMajor(v string) (int, error) {
 		return 0, fmt.Errorf("invalid version %q", v)
 	}
 	return n, nil
+}
+
+// First propose preferred direct releases together. A bulk target refused by
+// dependents retries within their final ranges; other graph failures still fail.
+func buildUpgradePlan(p paths, current *manifest.Manifest, targets []dependency.Target, access *installSources, bulk bool) (*dependency.Plan, error) {
+	for {
+		plan, err := dependency.BuildPlan(dependency.Scope{Global: p.global, ManifestPath: p.manifest, Command: "upgrade"}, current, targets, access)
+		var refusal *dependency.UpgradeRefusalError
+		if !bulk || !errors.As(err, &refusal) {
+			return plan, err
+		}
+		changed := false
+		for i := range targets {
+			if targets[i].Name == refusal.Name && !targets[i].BoundByDependents {
+				targets[i].BoundByDependents = true
+				changed = true
+				break
+			}
+		}
+		if !changed {
+			return nil, err
+		}
+	}
 }

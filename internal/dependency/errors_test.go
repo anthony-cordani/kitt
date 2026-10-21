@@ -14,7 +14,7 @@ func TestPlannerErrorContract(t *testing.T) {
 		m.Skills["security"] = pin("team", "3.0.0", "security", true, "code-review@^2.0.0")
 		m.Skills["review"] = pin("team", "2.0.0", "review", true, "code-review@^1.0.0")
 		err := failure(t, m, nil, nil)
-		want := "kitt install: incompatible requirements for team/code-review\n" +
+		want := "incompatible requirements for team/code-review\n" +
 			"  team/review@2.0.0 requires ^1.0.0\n" +
 			"  team/security@3.0.0 requires ^2.0.0\n" +
 			"  one version per skill name is allowed in project scope"
@@ -61,7 +61,7 @@ func TestPlannerUnknownAliasScopeRecovery(t *testing.T) {
 		if global {
 			command = "kitt install -g --source"
 		}
-		want := "kitt install: unknown source alias \"other-source\"\n" +
+		want := "unknown source alias \"other-source\"\n" +
 			"  required by team/review@2.0.0: \"other-source/us-review@^1.0.0\"\n" +
 			"  missing entry: [sources].other-source in /selected/kitt.toml\n" +
 			"  add it with: " + command + " \"other-source=<repository-url>\""

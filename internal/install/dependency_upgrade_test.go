@@ -208,11 +208,14 @@ func TestUpgradeTransitiveOnlyNamedAndBoundedByDependents(t *testing.T) {
 				dependencyRelease(t, f.repo, "alpha", "1.9.0")
 				// An excluded release must not contribute its invalid requirements.
 				dependencyRelease(t, f.repo, "alpha", "2.0.0", "unknown/forbidden@^9")
-				before := f.snapshot(t)
-				f.upgrade(t, "", major)
-				assertSameTree(t, before, f.snapshot(t))
-				f.upgrade(t, "alpha", major)
+				out := f.upgrade(t, "", major)
 				s := loadManifest(t, f.path).Skills["alpha"]
+				assertResolved(t, s, "", "1.9.0")
+				if major && !strings.Contains(out, "alpha 2.0.0 is available but demo/zulu@1.0.0 requires ^1") {
+					t.Fatalf("missing blocked-major note: %s", out)
+				}
+				f.upgrade(t, "alpha", major)
+				s = loadManifest(t, f.path).Skills["alpha"]
 				assertResolved(t, s, "", "1.9.0")
 				if s.IsDirect() || !slices.Equal(s.Via, []string{"zulu"}) {
 					t.Fatalf("named upgrade promoted dependency: %+v", s)
