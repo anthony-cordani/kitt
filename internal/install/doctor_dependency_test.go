@@ -338,6 +338,32 @@ func TestDoctorInvalidPinnedFrontmatterIsFinding(t *testing.T) {
 	}
 }
 
+func TestDoctorForeignRequiresMatchesDependencyFree(t *testing.T) {
+	for _, requires := range []string{`"python3"`, `["numpy"]`} {
+		t.Run(requires, func(t *testing.T) {
+			project := healthyProject(t)
+			path := filepath.Join(project, manifest.FileName)
+			m := loadManifest(t, path)
+			s := m.Skills["review"]
+			s.Direct, s.Via, s.Resolved.Requires = nil, nil, nil
+			body := "---\nname: review\ndescription: Test skill review.\nmetadata:\n  requires: " + requires + "\n---\nreview 1.4.0\n"
+			testutil.WriteFile(t, filepath.Join(skillPath(project, "review"), "SKILL.md"), body)
+			hash, err := skill.Hash(skillPath(project, "review"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.Resolved.Hash = hash
+			if err := m.Save(path); err != nil {
+				t.Fatal(err)
+			}
+			// Problem count 0 is the doctor exit code 0.
+			if n, out := mustDoctor(t, project); n != 0 || out != "ok\n" {
+				t.Fatalf("doctor = %d, %q; want main's 0, \"ok\\n\"", n, out)
+			}
+		})
+	}
+}
+
 func TestDoctorLegacyFrontmatterDoesNotGovernVia(t *testing.T) {
 	for _, stale := range []bool{false, true} {
 		t.Run(fmt.Sprint(stale), func(t *testing.T) {

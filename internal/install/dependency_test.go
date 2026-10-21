@@ -868,7 +868,7 @@ func assertLinkUntouched(t *testing.T, path string, before os.FileInfo, target s
 
 func TestUnknownLegacyParentRefusesDependencyMovement(t *testing.T) {
 	for _, missing := range []bool{false, true} {
-		for _, operation := range []string{"install", "upgrade", "major upgrade", "bulk upgrade", "install parent", "upgrade parent"} {
+		for _, operation := range []string{"install", "upgrade", "major upgrade"} {
 			t.Run(fmt.Sprintf("missing=%t/%s", missing, operation), func(t *testing.T) {
 				f := dependencyScope(t, false)
 				dependencyRelease(t, f.repo, "leaf", "1.0.0")
@@ -886,31 +886,18 @@ func TestUnknownLegacyParentRefusesDependencyMovement(t *testing.T) {
 				}
 				dependencyRelease(t, f.repo, "leaf", "1.1.0")
 				dependencyRelease(t, f.repo, "leaf", "2.0.0")
-				if operation == "install parent" || operation == "upgrade parent" {
-					dependencyRelease(t, f.repo, "a", "2.0.0", "leaf@^2")
-				}
 				before := f.snapshot(t)
 				version := "1.1.0"
 				var err error
 				if operation == "install" {
 					version = "2.0.0"
 					err = install.Add(f.opts, "leaf@^2")
-				} else if operation == "install parent" {
-					version = "2.0.0"
-					err = install.Add(f.opts, "a@^2")
 				} else {
-					major := operation == "major upgrade" || operation == "upgrade parent"
+					major := operation == "major upgrade"
 					if major {
 						version = "2.0.0"
 					}
-					name := "leaf"
-					if operation == "bulk upgrade" {
-						name = ""
-					}
-					if operation == "upgrade parent" {
-						name = "a"
-					}
-					err = install.Upgrade(f.opts, name, major)
+					err = install.Upgrade(f.opts, "leaf", major)
 				}
 				want := "cannot verify that a accepts leaf " + version + "; run `kitt install` to restore a first"
 				assertUntouchedError(t, err, want)
@@ -918,5 +905,82 @@ func TestUnknownLegacyParentRefusesDependencyMovement(t *testing.T) {
 				assertNoTempDirs(t, f.root)
 			})
 		}
+	}
+}
+
+func TestUnverifiedParentTargetMovesItsDependency(t *testing.T) {
+	for _, missing := range []bool{false, true} {
+		for _, operation := range []string{"install", "upgrade"} {
+			t.Run(fmt.Sprintf("missing=%t/%s", missing, operation), func(t *testing.T) {
+				f := dependencyScope(t, false)
+				dependencyRelease(t, f.repo, "leaf", "1.0.0")
+				dependencyRelease(t, f.repo, "a", "1.0.0", "leaf@^1")
+				f.add(t, "a")
+				m := loadManifest(t, f.path)
+				m.Skills["a"].Resolved.Requires = nil
+				f.save(t, m)
+				if missing {
+					if err := os.RemoveAll(skillPath(f.root, "a")); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					testutil.WriteFile(t, filepath.Join(skillPath(f.root, "a"), "SKILL.md"), "local edit\n")
+				}
+				dependencyRelease(t, f.repo, "leaf", "2.0.0")
+				dependencyRelease(t, f.repo, "a", "2.0.0", "leaf@^2")
+				if operation == "install" {
+					f.add(t, "a@^2")
+				} else if err := install.Upgrade(f.opts, "a", true); err != nil {
+					t.Fatalf("upgrade --major a: %v", err)
+				}
+				got := loadManifest(t, f.path)
+				a, leaf := got.Skills["a"], got.Skills["leaf"]
+				if a.Resolved == nil || leaf.Resolved == nil || a.Resolved.Version != "2.0.0" || leaf.Resolved.Version != "2.0.0" || !slices.Equal(leaf.Via, []string{"a"}) {
+					t.Fatalf("a=%+v resolved %+v; leaf=%+v resolved %+v", a, a.Resolved, leaf, leaf.Resolved)
+				}
+				body := readText(t, filepath.Join(skillPath(f.root, "a"), "SKILL.md"))
+				if strings.Contains(body, "local edit") || !strings.Contains(body, "2.0.0") {
+					t.Fatalf("parent was not reinstalled:\n%s", body)
+				}
+				assertNoTempDirs(t, f.root)
+			})
+		}
+	}
+}
+
+func TestBulkUpgradeUnverifiedParentUsesSelectedCommit(t *testing.T) {
+	for _, missing := range []bool{false, true} {
+		t.Run(fmt.Sprintf("missing=%t", missing), func(t *testing.T) {
+			f := dependencyScope(t, false)
+			dependencyRelease(t, f.repo, "leaf", "1.0.0")
+			dependencyRelease(t, f.repo, "a", "1.0.0", "leaf@^1")
+			f.add(t, "a")
+			m := loadManifest(t, f.path)
+			m.Skills["a"].Resolved.Requires = nil
+			f.save(t, m)
+			if missing {
+				if err := os.RemoveAll(skillPath(f.root, "a")); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				testutil.WriteFile(t, filepath.Join(skillPath(f.root, "a"), "SKILL.md"), "local edit\n")
+			}
+			dependencyRelease(t, f.repo, "leaf", "1.1.0")
+			dependencyRelease(t, f.repo, "leaf", "2.0.0")
+			if err := install.Upgrade(f.opts, "", false); err != nil {
+				t.Fatal(err)
+			}
+			got := loadManifest(t, f.path)
+			a, leaf := got.Skills["a"], got.Skills["leaf"]
+			if a.Resolved.Version != "1.0.0" || leaf.Resolved.Version != "1.1.0" || !slices.Equal(leaf.Via, []string{"a"}) {
+				t.Fatalf("a=%s leaf=%s via=%v", a.Resolved.Version, leaf.Resolved.Version, leaf.Via)
+			}
+			if missing {
+				assertMissing(t, skillPath(f.root, "a"))
+			} else if text := readText(t, filepath.Join(skillPath(f.root, "a"), "SKILL.md")); text != "local edit\n" {
+				t.Fatalf("unmoved parent was rewritten: %q", text)
+			}
+			assertNoTempDirs(t, f.root)
+		})
 	}
 }

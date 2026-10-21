@@ -100,3 +100,33 @@ func TestLegacyNonKittRequirementsFailWhenResolved(t *testing.T) {
 		}
 	}
 }
+
+func TestKittShapedRequiresFailRestoreUpgradeAndInstall(t *testing.T) {
+	for _, mode := range []string{"restore", "upgrade", "install"} {
+		t.Run(mode, func(t *testing.T) {
+			p, opts := legacyRequirementsFixture(t, `["db@@1.0"]`)
+			before := transactionSnapshot(t, p)
+			stderr := captureStderr(t)
+			var err error
+			switch mode {
+			case "restore":
+				err = Restore(opts)
+			case "upgrade":
+				err = Upgrade(opts, "", false)
+			default:
+				err = Add(opts, "other")
+			}
+			warning := stderr()
+			var pe *dependency.PlanError
+			if err == nil || !errors.As(err, &pe) || !pe.ManagedStateUntouched || !strings.Contains(err.Error(), "db@@1.0") {
+				t.Fatalf("%s = %v", mode, err)
+			}
+			if strings.Contains(warning, "warning:") {
+				t.Fatalf("kitt-shaped requirements warned instead of failing: %s", warning)
+			}
+			if after := transactionSnapshot(t, p); !reflect.DeepEqual(before, after) {
+				t.Fatal("invalid requirements changed managed state")
+			}
+		})
+	}
+}

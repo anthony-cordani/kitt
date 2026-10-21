@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -65,5 +66,51 @@ func TestInstallClaimsNoChangesOnlyBeforeManagedWrites(t *testing.T) {
 				t.Fatalf("source mutation = %t, want %t", added, addSource)
 			}
 		})
+	}
+}
+
+func TestUpgradeRollbackSaysNoChangesApplied(t *testing.T) {
+	testutil.IsolateHome(t)
+	project, repo := testutil.NewRepo(t), testutil.NewRepo(t)
+	testutil.Release(t, repo, "review", "1.0.0")
+	testutil.WriteFile(t, filepath.Join(project, "AGENTS.md"), "# Project\n")
+	manifestPath := filepath.Join(project, manifest.FileName)
+	testutil.WriteFile(t, manifestPath, fmt.Sprintf("[sources]\ndemo = %q\n", testutil.URL(repo)))
+	t.Chdir(project)
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"install", "review"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("install exit %d: %s", code, &stderr)
+	}
+	testutil.Release(t, repo, "review", "1.1.0")
+	skill := filepath.Join(project, ".agents", "skills", "review", "SKILL.md")
+	beforeSkill, err := os.ReadFile(skill)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeManifest, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitignore := filepath.Join(project, ".gitignore")
+	testutil.WriteFile(t, gitignore, "user entry\n")
+	if err := os.Chmod(gitignore, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(gitignore, 0o644) })
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"upgrade", "review"}, &stdout, &stderr); code != 1 {
+		t.Fatalf("upgrade exit %d, stderr %s", code, &stderr)
+	}
+	if !strings.Contains(stderr.String(), "  no changes applied\n") || strings.Contains(stdout.String(), "upgraded") {
+		t.Fatalf("stdout %q\nstderr %q", stdout.String(), stderr.String())
+	}
+	afterSkill, err := os.ReadFile(skill)
+	if err != nil || string(afterSkill) != string(beforeSkill) || !strings.Contains(string(afterSkill), "review 1.0.0") {
+		t.Fatalf("skill changed: %s, %v", afterSkill, err)
+	}
+	afterManifest, err := os.ReadFile(manifestPath)
+	if err != nil || string(afterManifest) != string(beforeManifest) {
+		t.Fatalf("manifest changed:\n%s\nwas\n%s\n%v", afterManifest, beforeManifest, err)
 	}
 }

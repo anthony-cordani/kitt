@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 
 	"github.com/anthony-cordani/kitt/internal/dependency"
 	"github.com/anthony-cordani/kitt/internal/manifest"
@@ -24,8 +23,13 @@ func (d *doctor) dependencies(m *manifest.Manifest, names []string) error {
 			if !d.verified[name] {
 				continue
 			}
-			meta, err := skill.ParseFile(filepath.Join(d.p.skillsDir, name, "SKILL.md"))
-			if len(meta.Requires) > 0 || err != nil && strings.Contains(err.Error(), "metadata.requires") {
+			path := filepath.Join(d.p.skillsDir, name, "SKILL.md")
+			meta, _ := skill.ParseFile(path)
+			// Foreign metadata.requires is not a kitt dependency and adds no finding.
+			if foreign, ferr := skill.ForeignRequires(path); ferr == nil && foreign {
+				continue
+			}
+			if len(meta.Requires) > 0 {
 				inPlay = true
 				break
 			}

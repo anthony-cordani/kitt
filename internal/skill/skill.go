@@ -79,6 +79,66 @@ func parseRequirements(path string, node yaml.Node) ([]string, error) {
 	return requires, nil
 }
 
+// ForeignRequires reports whether SKILL.md metadata.requires is outside kitt's
+// format. A value is foreign when it is not a YAML sequence of strings, or when
+// none of its string entries contains "@". A sequence with at least one "@"
+// entry is kitt-shaped even if an entry is not a valid reference. Absent
+// metadata.requires is not foreign. An unreadable file or frontmatter returns
+// an error.
+func ForeignRequires(path string) (bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false, err
+	}
+	raw, err := frontmatter(data)
+	if err != nil {
+		return false, err
+	}
+	var doc struct {
+		Metadata map[string]yaml.Node `yaml:"metadata"`
+	}
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		return false, err
+	}
+	node, ok := doc.Metadata["requires"]
+	if !ok || node.Kind == 0 {
+		return false, nil
+	}
+	return foreignRequiresValue(node), nil
+}
+
+func foreignRequiresValue(node yaml.Node) bool {
+	if node.Kind == yaml.AliasNode {
+		if node.Alias == nil {
+			return true
+		}
+		node = *node.Alias
+	}
+	if node.Kind != yaml.SequenceNode {
+		return true
+	}
+	at := false
+	for _, item := range node.Content {
+		if item == nil {
+			return true
+		}
+		n := *item
+		if n.Kind == yaml.AliasNode {
+			if n.Alias == nil {
+				return true
+			}
+			n = *n.Alias
+		}
+		if n.Kind != yaml.ScalarNode || n.Tag != "!!str" {
+			return true
+		}
+		if strings.Contains(n.Value, "@") {
+			at = true
+		}
+	}
+	return !at
+}
+
 // ValidName reports whether name follows the Agent Skills naming rules.
 func ValidName(name string) error {
 	count := 0

@@ -401,14 +401,15 @@ func planningManifest(p paths, m *manifest.Manifest, access *installSources, tar
 		if pin.Requires != nil {
 			continue
 		}
-		// Verified legacy trees need no source IO. Non-kitt requires metadata
-		// outside the requested closure is unknown, rather than a fatal input.
+		// Verified legacy trees need no source IO. Foreign metadata.requires
+		// outside the requested closure, and on legacy pins during restore, is
+		// unknown. A sequence that contains "@" is kitt-shaped and is an error.
 		raw, matched, err := installedRequirements(p, s, name)
 		if !access.restore && (!matched || err != nil) {
 			access.unverified[name] = true
 		}
 		if err != nil {
-			if (!access.targets[name] || access.restore) && matched && strings.Contains(err.Error(), "metadata.requires") {
+			if (!access.targets[name] || access.restore) && matched && foreignRequires(filepath.Join(p.skillsDir, name, "SKILL.md"), err) {
 				fmt.Fprintf(os.Stderr, "warning: requirements for %s are unknown: %v\n", name, err)
 			} else {
 				return nil, err
@@ -500,7 +501,7 @@ func buildDependencyPlan(p paths, current *manifest.Manifest, targets []dependen
 			}
 		}
 		if !changed {
-			if err := verifyUnknownParents(access.current, plan, access.unverified); err != nil {
+			if err := verifyUnknownParents(access.current, plan, access.unverified, access.targets); err != nil {
 				return nil, validationError(err)
 			}
 			return plan, nil
@@ -521,6 +522,24 @@ func installedRequirements(p paths, s *manifest.Skill, name string) (raw []strin
 	}
 	raw, err = dependency.NormalizeRequirements(meta.Requires, s.Source, false)
 	return raw, true, err
+}
+
+// foreignRequires reports whether err is a legacy metadata.requires value kitt
+// does not own. Kitt-shaped requirements stay errors in every mode. A different
+// failure, such as a declared skill name, stays an error too.
+func foreignRequires(path string, err error) bool {
+	if err == nil {
+		return false
+	}
+	foreign, ferr := skill.ForeignRequires(path)
+	if ferr != nil || !foreign {
+		return false
+	}
+	if _, parseErr := skill.ParseFile(path); parseErr != nil {
+		return true
+	}
+	var validation *dependency.ValidationError
+	return errors.As(err, &validation) && strings.HasPrefix(validation.Location, "metadata.requires")
 }
 
 func pinnedRequirements(p paths, s *manifest.Skill, name string, access *installSources) ([]string, error) {
@@ -625,21 +644,43 @@ func preserveUnknownRequirementPins(original *manifest.Manifest, plan *dependenc
 	plan.Orphans = reachableOrphans(plan.Nodes)
 }
 
-// A recorded edge from an unverifiable legacy parent still protects its child.
-// Restoring that parent establishes an authoritative requirements snapshot.
-func verifyUnknownParents(original *manifest.Manifest, plan *dependency.Plan, unverified map[string]bool) error {
+// A recorded edge from an unverifiable legacy parent still protects its child
+// while that parent stays at its current commit. A command target or a parent
+// the plan moves is authoritative: its requirements come from the selected commit.
+func verifyUnknownParents(original *manifest.Manifest, plan *dependency.Plan, unverified, targets map[string]bool) error {
+	chosen := make(map[string]dependency.Node, len(plan.Nodes))
+	for _, n := range plan.Nodes {
+		chosen[n.Name] = n
+	}
 	for _, n := range plan.Nodes {
 		s := original.Skills[n.Name]
 		if s == nil || s.Resolved == nil || s.Source == n.Source && s.Resolved.Commit == n.Commit {
 			continue
 		}
 		for _, parent := range s.Via {
-			if unverified[parent] {
+			if unverified[parent] && unverifiedParentStays(original, parent, chosen, targets) {
 				return fmt.Errorf("cannot verify that %s accepts %s %s; run `kitt install` to restore %s first", parent, n.Name, versionLabel(n.Version, n.Commit), parent)
 			}
 		}
 	}
 	return nil
+}
+
+// unverifiedParentStays reports a parent this command does not retarget and
+// whose selected source and commit are unchanged.
+func unverifiedParentStays(original *manifest.Manifest, parent string, chosen map[string]dependency.Node, targets map[string]bool) bool {
+	if targets[parent] {
+		return false
+	}
+	n, ok := chosen[parent]
+	if !ok {
+		return true
+	}
+	old := original.Skills[parent]
+	if old == nil || old.Resolved == nil {
+		return false
+	}
+	return old.Source == n.Source && old.Resolved.Commit == n.Commit
 }
 
 func reachableOrphans(nodes []dependency.Node) []string {

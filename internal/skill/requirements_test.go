@@ -55,6 +55,38 @@ func TestParseFileUnquotedRequirementStrings(t *testing.T) {
 	}
 }
 
+func TestForeignRequires(t *testing.T) {
+	tests := []struct {
+		name string
+		meta string
+		want bool
+	}{
+		{name: "absent", meta: "metadata:\n  version: \"1.0.0\"\n", want: false},
+		{name: "string", meta: "metadata:\n  requires: \"python3\"\n", want: true},
+		{name: "list", meta: "metadata:\n  requires: [\"numpy\"]\n", want: true},
+		{name: "list without at", meta: "metadata:\n  requires:\n    - numpy\n    - python3\n", want: true},
+		{name: "empty list", meta: "metadata:\n  requires: []\n", want: true},
+		{name: "number", meta: "metadata:\n  requires: [123]\n", want: true},
+		{name: "mapping", meta: "metadata:\n  requires: {name: review}\n", want: true},
+		{name: "kitt", meta: "metadata:\n  requires: [\"leaf@^1\"]\n", want: false},
+		{name: "double at", meta: "metadata:\n  requires: [\"db@@1.0\"]\n", want: false},
+		{name: "empty constraint", meta: "metadata:\n  requires: [\"db@\"]\n", want: false},
+		{name: "bad alias", meta: "metadata:\n  requires: [\"bad alias/name@^1\"]\n", want: false},
+		{name: "mixed", meta: "metadata:\n  requires: [\"numpy\", \"db@@1.0\"]\n", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "SKILL.md")
+			doc := "---\nname: review\ndescription: Read carefully.\n" + tt.meta + "---\n"
+			testutil.WriteFile(t, path, doc)
+			got, err := skill.ForeignRequires(path)
+			if err != nil || got != tt.want {
+				t.Fatalf("ForeignRequires = %v, %v; want %v", got, err, tt.want)
+			}
+		})
+	}
+}
+
 func TestParseFileRejectsNonStringVersion(t *testing.T) {
 	for _, ending := range []string{"\n", "\r\n"} {
 		t.Run(fmt.Sprintf("%q", ending), func(t *testing.T) {
