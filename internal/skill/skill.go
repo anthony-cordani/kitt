@@ -17,7 +17,8 @@ import (
 type Meta struct {
 	Name        string
 	Description string
-	Version     string // metadata.version, "" when absent
+	Version     string   // metadata.version, "" when absent
+	Requires    []string // metadata.requires, nil when absent
 }
 
 // ParseFile reads a SKILL.md file and returns its frontmatter.
@@ -31,18 +32,56 @@ func ParseFile(path string) (Meta, error) {
 		return Meta{}, fmt.Errorf("parse skill file: %w", err)
 	}
 	var doc struct {
-		Name        string            `yaml:"name"`
-		Description string            `yaml:"description"`
-		Metadata    map[string]string `yaml:"metadata"`
+		Name        string               `yaml:"name"`
+		Description string               `yaml:"description"`
+		Metadata    map[string]yaml.Node `yaml:"metadata"`
 	}
 	if err := yaml.Unmarshal(raw, &doc); err != nil {
 		return Meta{}, fmt.Errorf("parse skill frontmatter: %w", err)
 	}
 	meta := Meta{Name: doc.Name, Description: doc.Description}
-	if doc.Metadata != nil {
-		meta.Version = doc.Metadata["version"]
+	meta.Requires, err = parseRequirements(path, doc.Metadata["requires"])
+	if err != nil {
+		return Meta{}, err
+	}
+	for key, node := range doc.Metadata {
+		if key == "requires" {
+			continue
+		}
+		var value string
+		if err := node.Decode(&value); err != nil {
+			return Meta{}, fmt.Errorf("parse skill frontmatter: %w", err)
+		}
+		if key == "version" {
+			meta.Version = value
+		}
 	}
 	return meta, nil
+}
+
+func parseRequirements(path string, node yaml.Node) ([]string, error) {
+	if node.Kind == 0 {
+		return nil, nil
+	}
+	line := node.Line + 1 // Include the opening frontmatter delimiter in file locations.
+	if node.Kind == yaml.AliasNode {
+		node = *node.Alias
+	}
+	if node.Kind != yaml.SequenceNode {
+		return nil, fmt.Errorf("parse skill frontmatter %q: metadata.requires[0] at line %d: must be a sequence of strings", path, line)
+	}
+	requires := make([]string, len(node.Content))
+	for i, item := range node.Content {
+		line := item.Line + 1
+		if item.Kind == yaml.AliasNode {
+			item = item.Alias
+		}
+		if item.Kind != yaml.ScalarNode || item.Tag != "!!str" {
+			return nil, fmt.Errorf("parse skill frontmatter %q: metadata.requires[%d] at line %d: must be a string", path, i, line)
+		}
+		requires[i] = item.Value
+	}
+	return requires, nil
 }
 
 // ValidName reports whether name follows the Agent Skills naming rules.
