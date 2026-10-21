@@ -3,12 +3,14 @@ package install
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
+	"time"
 	"unicode/utf16"
 
 	"github.com/anthony-cordani/kitt/internal/dependency"
@@ -19,13 +21,16 @@ import (
 
 type stagedSkill struct{ dir, hash string }
 
-// Staging uses an existing ancestor of the install directory so validation does
-// not create managed directories, and the final renames stay on the same volume.
-func stagePlan(p paths, m *manifest.Manifest, plan *dependency.Plan, access *installSources) (staged map[string]stagedSkill, cleanup func(), err error) {
+// Staging and backups stay inside skillsDir, on the destination volume.
+func stagePlan(p paths, m *manifest.Manifest, plan *dependency.Plan, access *installSources, repair bool) (staged map[string]stagedSkill, cleanup func(), err error) {
 	root := ""
+	var created []string
 	cleanup = func() {
 		if root != "" {
 			os.RemoveAll(root)
+		}
+		for _, dir := range created {
+			_ = os.Remove(dir)
 		}
 	}
 	defer func() {
@@ -33,6 +38,15 @@ func stagePlan(p paths, m *manifest.Manifest, plan *dependency.Plan, access *ins
 			cleanup()
 		}
 	}()
+	for dir := p.skillsDir; ; dir = filepath.Dir(dir) {
+		if _, err := os.Lstat(dir); !errors.Is(err, fs.ErrNotExist) {
+			break
+		}
+		created = append(created, dir)
+	}
+	if err := os.MkdirAll(p.skillsDir, 0o755); err != nil {
+		return nil, cleanup, err
+	}
 	staged = map[string]stagedSkill{}
 	for _, n := range plan.Nodes {
 		if err := skill.ValidName(n.Name); err != nil {
@@ -48,6 +62,10 @@ func stagePlan(p paths, m *manifest.Manifest, plan *dependency.Plan, access *ins
 		if old := m.Skills[n.Name]; old != nil && old.Source == n.Source && old.Resolved != nil && old.Resolved.Commit == n.Commit {
 			expected = old.Resolved.Hash
 		}
+		if !repair && expected != "" {
+			staged[n.Name] = stagedSkill{hash: expected}
+			continue
+		}
 		match, err := hashMatches(filepath.Join(p.skillsDir, n.Name), expected)
 		if err != nil {
 			return nil, cleanup, err
@@ -57,21 +75,7 @@ func stagePlan(p paths, m *manifest.Manifest, plan *dependency.Plan, access *ins
 			continue
 		}
 		if root == "" {
-			parent := p.skillsDir
-			for {
-				info, statErr := os.Stat(parent)
-				if statErr == nil {
-					if !info.IsDir() {
-						return nil, cleanup, fmt.Errorf("install directory %s is not a directory", parent)
-					}
-					break
-				}
-				if !errors.Is(statErr, fs.ErrNotExist) {
-					return nil, cleanup, statErr
-				}
-				parent = filepath.Dir(parent)
-			}
-			root, err = os.MkdirTemp(parent, tempPrefix+"plan-")
+			root, err = os.MkdirTemp(p.skillsDir, tempPrefix+"plan-")
 			if err != nil {
 				return nil, cleanup, err
 			}
@@ -208,7 +212,7 @@ func preflightDirectory(dir string) error {
 	}
 }
 
-func applyStaged(p paths, plan *dependency.Plan, staged map[string]stagedSkill) error {
+func applyStaged(p paths, plan *dependency.Plan, staged map[string]stagedSkill, tx *applyTransaction) error {
 	nodes := map[string]dependency.Node{}
 	for _, n := range plan.Nodes {
 		nodes[n.Name] = n
@@ -231,8 +235,15 @@ func applyStaged(p paths, plan *dependency.Plan, staged map[string]stagedSkill) 
 				return err
 			}
 			dest := filepath.Join(p.skillsDir, name)
-			if err := os.RemoveAll(dest); err != nil {
-				return fmt.Errorf("remove skill %s: %w", name, err)
+			if err := tx.moveAside(dest); err != nil {
+				return err
+			}
+			// Persist ownership before publishing a directory, including on failure.
+			if err := p.installed.add(name); err != nil {
+				return err
+			}
+			if err := applyStep("rename", dest); err != nil {
+				return err
 			}
 			if err := os.Rename(s.dir, dest); err != nil {
 				return fmt.Errorf("install skill %s: %w", name, err)
@@ -244,6 +255,289 @@ func applyStaged(p paths, plan *dependency.Plan, staged map[string]stagedSkill) 
 		if err := apply(n.Name); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// applyStep is a per-run test seam; production callers leave it unset.
+var applyTestHook func(step, path string) error
+
+func applyStep(step, path string) error {
+	if applyTestHook != nil {
+		return applyTestHook(step, path)
+	}
+	return nil
+}
+
+// Only abandoned staging trees are swept. Backups are retained on rollback
+// failure and must never be swept automatically.
+func sweepStaging(dir string, started time.Time) error {
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), tempPrefix+"plan-") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if info.ModTime().Before(started) {
+			if err := os.RemoveAll(filepath.Join(dir, entry.Name())); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+type savedFile struct {
+	path   string
+	data   []byte
+	mode   fs.FileMode
+	target string
+	exists bool
+}
+
+type movedPath struct{ path, backup string }
+
+type applyTransaction struct {
+	root            string
+	files           []savedFile
+	moved           []movedPath
+	parents         []string
+	state           *installedState
+	names           map[string]bool
+	dirty, deferred bool
+}
+
+func newApplyTransaction(p paths) (*applyTransaction, error) {
+	root, err := os.MkdirTemp(p.skillsDir, tempPrefix+"backup-")
+	if err != nil {
+		return nil, err
+	}
+	tx := &applyTransaction{root: root, state: p.installed, names: map[string]bool{}, dirty: p.installed.dirty, deferred: p.installed.deferred}
+	for name, owned := range p.installed.names {
+		tx.names[name] = owned
+	}
+	for _, dir := range []string{p.claudeDir, filepath.Dir(p.claudeDir), filepath.Dir(p.manifest)} {
+		if _, err := os.Lstat(dir); errors.Is(err, fs.ErrNotExist) {
+			tx.parents = append(tx.parents, dir)
+		}
+	}
+	files := []string{p.manifest, filepath.Join(p.skillsDir, installedFile)}
+	if !p.global {
+		for _, name := range []string{"AGENTS.md", "CLAUDE.md", ".gitignore"} {
+			files = append(files, filepath.Join(p.root, name))
+		}
+	}
+	seen := map[string]bool{}
+	for _, path := range files {
+		// Finish writes through project-file symlinks. Preserve both each link
+		// and its referent so rollback also restores the bytes reached through it.
+		for !seen[path] {
+			seen[path] = true
+			f := savedFile{path: path}
+			info, err := os.Lstat(path)
+			if err == nil {
+				f.exists, f.mode = true, info.Mode()
+				if info.Mode()&os.ModeSymlink != 0 {
+					f.target, err = os.Readlink(path)
+				} else {
+					f.data, err = os.ReadFile(path)
+				}
+			}
+			if err != nil && !errors.Is(err, fs.ErrNotExist) {
+				os.RemoveAll(root)
+				return nil, err
+			}
+			tx.files = append(tx.files, f)
+			if f.mode&os.ModeSymlink == 0 {
+				break
+			}
+			path = f.target
+			if !filepath.IsAbs(path) {
+				path = filepath.Join(filepath.Dir(f.path), path)
+			}
+		}
+	}
+	return tx, nil
+}
+
+// Record the destination before attempting either rename. A missing destination
+// is also recorded, so rollback removes newly published directories and links.
+func (tx *applyTransaction) moveAside(path string) error {
+	for _, moved := range tx.moved {
+		if moved.path == path {
+			return nil
+		}
+	}
+	moved := movedPath{path: path}
+	if _, err := os.Lstat(path); err == nil {
+		moved.backup = filepath.Join(tx.root, fmt.Sprintf("%d", len(tx.moved)))
+		if err := os.Rename(path, moved.backup); err != nil {
+			return fmt.Errorf("back up %s to %s: %w", path, moved.backup, err)
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	tx.moved = append(tx.moved, moved)
+	return nil
+}
+
+func (tx *applyTransaction) prepareFinish(p paths, names []string, prune bool, out io.Writer) error {
+	// Keep managed links as filesystem objects, including Windows junctions.
+	for _, name := range names {
+		path := filepath.Join(p.claudeDir, name)
+		_, err := os.Lstat(path)
+		if errors.Is(err, fs.ErrNotExist) {
+			if err := tx.moveAside(path); err != nil {
+				return err
+			}
+		} else if err != nil {
+			return err
+		} else if sameDir(path, filepath.Join(p.skillsDir, name)) {
+			if err := tx.moveAside(path); err != nil {
+				return err
+			}
+		}
+	}
+	for name := range p.installed.names {
+		if !p.global && !slices.Contains(names, name) {
+			path := filepath.Join(p.claudeDir, name)
+			target, err := os.Readlink(path)
+			if err == nil {
+				abs, err := absoluteLinkTarget(p.claudeDir, target)
+				skills, _ := filepath.Abs(p.skillsDir)
+				if err == nil && withinDir(skills, abs) {
+					if err := tx.moveAside(path); err != nil {
+						return err
+					}
+				}
+			}
+			if prune && name != templates.BootstrapSkill {
+				dest := filepath.Join(p.skillsDir, name)
+				_, statErr := os.Lstat(dest)
+				if err := tx.moveAside(dest); err != nil {
+					return err
+				}
+				if statErr == nil {
+					fmt.Fprintf(out, "removed %s\n", name)
+				}
+			}
+		}
+	}
+	if !p.global {
+		data, err := os.ReadFile(filepath.Join(p.root, "AGENTS.md"))
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		active := false
+		for _, line := range strings.Split(string(data), "\n") {
+			active = active || strings.Trim(line, " \r") == templates.BootstrapMarker
+		}
+		if active || p.installed.names[templates.BootstrapSkill] {
+			link := filepath.Join(p.claudeDir, templates.BootstrapSkill)
+			dest := filepath.Join(p.skillsDir, templates.BootstrapSkill)
+			if _, err := os.Lstat(link); errors.Is(err, fs.ErrNotExist) || sameDir(link, dest) {
+				if err := tx.moveAside(link); err != nil {
+					return err
+				}
+			}
+			if err := tx.moveAside(dest); err != nil {
+				return err
+			}
+			if active {
+				if err := p.installed.add(templates.BootstrapSkill); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func restoreSavedFile(f savedFile) error {
+	info, err := os.Lstat(f.path)
+	if !f.exists {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return os.Remove(f.path)
+	}
+	if err == nil && info.Mode() == f.mode {
+		if f.mode&os.ModeSymlink != 0 {
+			if target, err := os.Readlink(f.path); err == nil && target == f.target {
+				return nil
+			}
+		} else if data, err := os.ReadFile(f.path); err == nil && string(data) == string(f.data) {
+			return nil
+		}
+	}
+	if f.mode&os.ModeSymlink != 0 {
+		if err := os.Remove(f.path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		return os.Symlink(f.target, f.path)
+	}
+	// Rename also restores a read-only original without writing through it.
+	file, err := os.CreateTemp(filepath.Dir(f.path), tempPrefix+"rollback-")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(file.Name())
+	_, writeErr := file.Write(f.data)
+	closeErr := file.Close()
+	if writeErr != nil {
+		return writeErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if err := os.Chmod(file.Name(), f.mode.Perm()); err != nil {
+		return err
+	}
+	return os.Rename(file.Name(), f.path)
+}
+
+func (tx *applyTransaction) rollback() error {
+	var failures []string
+	for i := len(tx.moved) - 1; i >= 0; i-- {
+		moved := tx.moved[i]
+		err := applyStep("rollback", moved.path)
+		if err == nil {
+			err = os.RemoveAll(moved.path)
+		}
+		if err == nil && moved.backup != "" {
+			err = os.Rename(moved.backup, moved.path)
+		}
+		if err != nil {
+			if moved.backup == "" {
+				failures = append(failures, fmt.Sprintf("%s: %v", moved.path, err))
+			} else {
+				failures = append(failures, fmt.Sprintf("%s (backup %s): %v", moved.path, moved.backup, err))
+			}
+		}
+	}
+	for _, file := range tx.files {
+		if err := restoreSavedFile(file); err != nil {
+			failures = append(failures, fmt.Sprintf("%s: %v", file.path, err))
+		}
+	}
+	tx.state.names, tx.state.dirty, tx.state.deferred = tx.names, tx.dirty, tx.deferred
+	for _, dir := range tx.parents {
+		_ = os.Remove(dir)
+	}
+	if len(failures) > 0 {
+		return fmt.Errorf("rollback incomplete; manual attention required: %s; backups retained in %s", strings.Join(failures, "; "), tx.root)
+	}
+	if err := os.RemoveAll(tx.root); err != nil {
+		return fmt.Errorf("rollback restored managed files; manual attention required for backup directory %s: %w", tx.root, err)
 	}
 	return nil
 }

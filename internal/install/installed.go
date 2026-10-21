@@ -120,6 +120,7 @@ func (s *installedState) add(name string) error {
 		return nil
 	}
 	s.names[name] = true
+	s.dirty = true
 	return s.save()
 }
 
@@ -128,6 +129,7 @@ func (s *installedState) remove(name string) error {
 		return nil
 	}
 	delete(s.names, name)
+	s.dirty = true
 	return s.save()
 }
 

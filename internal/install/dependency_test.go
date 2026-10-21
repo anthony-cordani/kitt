@@ -500,3 +500,131 @@ func TestDependencyExplicitInstallProtectsDependents(t *testing.T) {
 		})
 	}
 }
+
+func TestAddLeavesUnrelatedModifiedPinsOffline(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		for _, missing := range []bool{false, true} {
+			t.Run(fmt.Sprintf("legacy=%t/missing=%t", legacy, missing), func(t *testing.T) {
+				f := dependencyScope(t, false)
+				dependencyRelease(t, f.repo, "notes", "1.0.0")
+				f.add(t, "notes")
+				m := loadManifest(t, f.path)
+				if legacy {
+					m.Skills["notes"].Resolved.Requires = nil
+				}
+				otherRepo := testutil.NewRepo(t)
+				dependencyRelease(t, otherRepo, "other", "1.0.0")
+				m.Sources["other"] = testutil.URL(otherRepo)
+				f.save(t, m)
+				if missing {
+					if err := os.RemoveAll(skillPath(f.root, "notes")); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					testutil.WriteFile(t, filepath.Join(skillPath(f.root, "notes"), "SKILL.md"), "my local notes\n")
+				}
+				removeSourceAndCache(t, f.repo)
+				f.add(t, "other/other")
+				if missing {
+					assertMissing(t, skillPath(f.root, "notes"))
+				} else if got := readText(t, filepath.Join(skillPath(f.root, "notes"), "SKILL.md")); got != "my local notes\n" {
+					t.Fatalf("notes overwritten: %q", got)
+				}
+				if !reflect.DeepEqual(m.Skills["notes"], loadManifest(t, f.path).Skills["notes"]) {
+					t.Fatal("unrelated pin changed")
+				}
+			})
+		}
+	}
+}
+
+func TestRestoreBacktracksToKeepEveryPin(t *testing.T) {
+	f := dependencyScope(t, false)
+	dependencyRelease(t, f.repo, "leaf", "1.0.0")
+	f.add(t, "leaf")
+	dependencyRelease(t, f.repo, "leaf", "2.0.0")
+	dependencyRelease(t, f.repo, "root", "1.0.0", "leaf@^1")
+	dependencyRelease(t, f.repo, "root", "2.0.0", "leaf@^2")
+	m := loadManifest(t, f.path)
+	pin := *m.Skills["leaf"].Resolved
+	m.Skills["root"] = &manifest.Skill{Source: "demo"}
+	f.save(t, m)
+	f.restore(t)
+	m = loadManifest(t, f.path)
+	if m.Skills["root"].Resolved.Version != "1.0.0" || !reflect.DeepEqual(pin, *m.Skills["leaf"].Resolved) {
+		t.Fatalf("unexpected pins: %+v", m.Skills)
+	}
+}
+
+func TestAddRejectsUnrelatedStalePin(t *testing.T) {
+	f := dependencyScope(t, false)
+	dependencyRelease(t, f.repo, "stale", "1.0.0")
+	f.add(t, "stale")
+	dependencyRelease(t, f.repo, "stale", "2.0.0")
+	dependencyRelease(t, f.repo, "other", "1.0.0")
+	m := loadManifest(t, f.path)
+	m.Skills["stale"].Version = "^2"
+	f.save(t, m)
+	before := f.snapshot(t)
+	assertUntouchedError(t, install.Add(f.opts, "other"), "skills.stale.version")
+	assertSameTree(t, before, f.snapshot(t))
+	f.add(t, "stale@^2")
+}
+
+func TestAddEmptyConstraintAndUnchangedOutput(t *testing.T) {
+	f := dependencyScope(t, false)
+	dependencyRelease(t, f.repo, "foo", "1.0.0")
+	dependencyRelease(t, f.repo, "foo", "2.0.0")
+	f.add(t, "demo/foo@")
+	if got := loadManifest(t, f.path).Skills["foo"].Resolved.Version; got != "2.0.0" {
+		t.Fatalf("got %s", got)
+	}
+	removeSourceAndCache(t, f.repo)
+	before := f.snapshot(t)
+	var out strings.Builder
+	f.opts.Out = &out
+	f.add(t, "foo")
+	if !strings.Contains(out.String(), "up to date foo 2.0.0") || strings.Contains(out.String(), "added foo") {
+		t.Fatalf("output: %s", out.String())
+	}
+	assertSameTree(t, before, f.snapshot(t))
+}
+
+func TestAddLoadsLegacyRequestedClosure(t *testing.T) {
+	f := dependencyScope(t, false)
+	dependencyRelease(t, f.repo, "leaf", "1.0.0")
+	dependencyRelease(t, f.repo, "child", "1.0.0", "leaf@^1")
+	f.add(t, "child")
+	m := loadManifest(t, f.path)
+	m.Skills["child"].Resolved.Requires = nil
+	m.Skills["leaf"].Resolved.Requires = nil
+	f.save(t, m)
+	dependencyRelease(t, f.repo, "root", "1.0.0", "child@^1")
+	f.add(t, "root")
+	m = loadManifest(t, f.path)
+	if m.Skills["child"].Resolved.Requires == nil || !slices.Equal(m.Skills["leaf"].Via, []string{"child"}) {
+		t.Fatal("legacy closure not loaded")
+	}
+}
+
+func TestUpgradeRejectsUnrelatedStalePin(t *testing.T) {
+	f := dependencyScope(t, false)
+	dependencyRelease(t, f.repo, "stale", "1.0.0")
+	dependencyRelease(t, f.repo, "other", "1.0.0")
+	f.add(t, "stale")
+	f.add(t, "other")
+	dependencyRelease(t, f.repo, "stale", "2.0.0")
+	dependencyRelease(t, f.repo, "other", "1.1.0")
+	m := loadManifest(t, f.path)
+	m.Skills["stale"].Version = "^2"
+	f.save(t, m)
+	before := f.snapshot(t)
+	assertUntouchedError(t, install.Upgrade(f.opts, "other", false), "skills.stale.version")
+	assertSameTree(t, before, f.snapshot(t))
+	if err := install.Upgrade(f.opts, "stale", false); err != nil {
+		t.Fatalf("explicit stale target: %v", err)
+	}
+	if got := loadManifest(t, f.path).Skills["stale"].Resolved.Version; got != "2.0.0" {
+		t.Fatalf("explicit target pin: %s", got)
+	}
+}

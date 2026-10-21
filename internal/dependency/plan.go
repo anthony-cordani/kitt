@@ -23,6 +23,13 @@ type SourceAccess interface {
 	Requires(source, skill, commit string) ([]string, error)
 }
 
+// PinConstraintAccess optionally supplies fixed-pin constraints after the target
+// list is known. Constraint errors are planning errors, never source failures.
+// Fixed pins participate in search conflicts so other candidates can be tried.
+type PinConstraintAccess interface {
+	PinConstraints(targets []Target) (map[string]bool, error)
+}
+
 // TipAccess optionally supports a new, unconstrained direct install without tags.
 // A branch tip can never satisfy a dependency's explicit range.
 type TipAccess interface {
@@ -87,6 +94,7 @@ type planner struct {
 	indexes      map[string]map[string]int
 	explored     int
 	movable      map[string]bool
+	fixed        map[string]bool
 }
 
 // BuildPlan plans one scope without writing managed state or mutating inputs.
@@ -122,6 +130,13 @@ func BuildPlan(scope Scope, current *manifest.Manifest, targets []Target, access
 	}
 	if err := p.prepare(targets); err != nil {
 		return nil, err
+	}
+	if constraints, ok := access.(PinConstraintAccess); ok {
+		var err error
+		p.fixed, err = constraints.PinConstraints(targets)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if err := p.preparePins(); err != nil {
 		return nil, err
@@ -384,7 +399,7 @@ func (p *planner) candidates(name string, d *demand) ([]Release, error) {
 		// Explicit candidate policy is evaluated without dependent constraints.
 		requests = []Requirement{{Ref: Ref{Constraint: s.Version}}}
 	}
-	if pin != nil && !p.movable[name] && (!target || (t.Policy == Install && t.Constraint == "")) && matches(pin.Version, requests) {
+	if pin != nil && (!p.movable[name] || p.fixed[name]) && (!target || (t.Policy == Install && t.Constraint == "")) && matches(pin.Version, requests) {
 		r := Release{Version: pin.Version, Commit: pin.Commit}
 		if target {
 			p.locked[name] = r
@@ -495,6 +510,9 @@ func (p *planner) pinConflict(name string, d *demand) *ConflictError {
 // A changed installed parent supplies fixed requirements, like the original
 // manifest graph. New dependency choices still cannot displace compatible pins.
 func (p *planner) pinMayMove(name string, d *demand) bool {
+	if p.fixed[name] {
+		return false
+	}
 	if p.movable[name] {
 		return true
 	}

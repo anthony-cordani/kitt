@@ -1,10 +1,21 @@
 package install
 
 import (
+	"errors"
+	"fmt"
+	"github.com/anthony-cordani/kitt/internal/dependency"
+	"github.com/anthony-cordani/kitt/internal/manifest"
+	"github.com/anthony-cordani/kitt/internal/source"
+	"github.com/anthony-cordani/kitt/internal/templates"
+	"github.com/anthony-cordani/kitt/internal/testutil"
+	"io/fs"
+	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestInstallDestinationPreflight(t *testing.T) {
@@ -28,5 +39,334 @@ func TestInstallDestinationPreflight(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), tc.name) || !strings.Contains(err.Error(), tc.root) {
 			t.Fatalf("preflight %s/%s: %v", tc.root, tc.name, err)
 		}
+	}
+}
+
+func TestStagingInsideSkillsAndSweepsOnlyOlderPlans(t *testing.T) {
+	dir := t.TempDir()
+	old := filepath.Join(dir, tempPrefix+"plan-old")
+	fresh := filepath.Join(dir, tempPrefix+"plan-fresh")
+	backup := filepath.Join(dir, tempPrefix+"backup-recover")
+	for _, path := range []string{old, fresh, backup} {
+		if err := os.Mkdir(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	started := time.Now()
+	if err := os.Chtimes(old, started.Add(-time.Hour), started.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(fresh, started.Add(time.Hour), started.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := sweepStaging(dir, started); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(old); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("old staging: %v", err)
+	}
+	for _, path := range []string{fresh, backup} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func transactionSnapshot(t *testing.T, p paths) map[string]string {
+	t.Helper()
+	result := map[string]string{}
+	roots := []string{p.skillsDir, p.claudeDir, p.manifest}
+	if !p.global {
+		for _, name := range []string{".gitignore", "AGENTS.md", "CLAUDE.md"} {
+			roots = append(roots, filepath.Join(p.root, name))
+		}
+	}
+	for _, root := range roots {
+		err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			info, err := entry.Info()
+			if err != nil {
+				return err
+			}
+			value := info.Mode().String()
+			if info.Mode()&os.ModeSymlink != 0 {
+				target, err := os.Readlink(path)
+				if err != nil {
+					return err
+				}
+				value += target
+			} else if !entry.IsDir() {
+				data, err := os.ReadFile(path)
+				if err != nil {
+					return err
+				}
+				value += string(data)
+			}
+			result[path] = value
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	return result
+}
+
+func transactionFixture(t *testing.T, global bool) (paths, Options, string) {
+	t.Helper()
+	home := testutil.IsolateHome(t)
+	root, repo := testutil.NewRepo(t), testutil.NewRepo(t)
+	opts := Options{Root: root, Global: global}
+	p, err := locate(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if global {
+		p.root = home
+	}
+	testutil.WriteFile(t, p.manifest, fmt.Sprintf("[sources]\ndemo = %q\n", testutil.URL(repo)))
+	return p, opts, repo
+}
+
+func transactionRelease(t *testing.T, repo, name, version string, requires ...string) {
+	t.Helper()
+	testutil.WriteSkillRequires(t, repo, name, version, requires)
+	testutil.Commit(t, repo, name+version)
+	testutil.Git(t, repo, "tag", name+"/v"+version)
+}
+
+func TestApplyTransactionRollbackAndRetry(t *testing.T) {
+	for _, global := range []bool{false, true} {
+		for _, failure := range []string{"rename", "finish", "ownership", "manifest", "gitignore"} {
+			if global && failure == "gitignore" {
+				continue
+			}
+			t.Run(fmt.Sprintf("global=%t/%s", global, failure), func(t *testing.T) {
+				p, opts, repo := transactionFixture(t, global)
+				transactionRelease(t, repo, "leaf", "1.0.0")
+				transactionRelease(t, repo, "root", "1.0.0", "leaf@^1")
+				if !global {
+					testutil.WriteFile(t, filepath.Join(p.root, "AGENTS.md"), templates.BootstrapMarker+"\n"+templates.DocsStart+"\nold index\n"+templates.DocsEnd+"\n")
+				}
+				if err := Add(opts, "root"); err != nil {
+					t.Fatal(err)
+				}
+				transactionRelease(t, repo, "extra", "1.0.0")
+				transactionRelease(t, repo, "leaf", "2.0.0")
+				transactionRelease(t, repo, "root", "2.0.0", "leaf@^2", "extra@^1")
+				if !global {
+					if err := os.Remove(filepath.Join(p.root, "CLAUDE.md")); err != nil {
+						t.Fatal(err)
+					}
+					testutil.WriteFile(t, filepath.Join(p.root, ".agents", "docs", "new.md"), "---\ntitle: New doc\n---\n")
+				}
+				gitignore := filepath.Join(p.root, ".gitignore")
+				if failure == "gitignore" {
+					testutil.WriteFile(t, gitignore, "user entry\n")
+					if err := os.Chmod(gitignore, 0o444); err != nil {
+						t.Fatal(err)
+					}
+					t.Cleanup(func() { _ = os.Chmod(gitignore, 0o644) })
+				}
+				before := transactionSnapshot(t, p)
+				fired := false
+				applyTestHook = func(step, path string) error {
+					if step == "rename" {
+						dirs, err := filepath.Glob(filepath.Join(p.skillsDir, tempPrefix+"plan-*"))
+						if err != nil || len(dirs) != 1 {
+							t.Fatalf("staging outside skills: %v, %v", dirs, err)
+						}
+						if filepath.Base(path) == "root" {
+							if _, err := os.Stat(filepath.Join(p.skillsDir, "extra", "SKILL.md")); err != nil {
+								t.Fatalf("failure did not follow managed writes: %v", err)
+							}
+						}
+					}
+					if step == failure && (step != "rename" || filepath.Base(path) == "root") {
+						fired = true
+						return fmt.Errorf("injected %s failure at %s", step, path)
+					}
+					return nil
+				}
+				t.Cleanup(func() { applyTestHook = nil })
+				err := Add(opts, "root@2.0.0")
+				applyTestHook = nil
+				if failure == "gitignore" {
+					if err == nil {
+						t.Fatal("read-only .gitignore did not fail")
+					}
+				} else if !fired {
+					t.Fatalf("%s hook did not fire: %v", failure, err)
+				}
+				var pe *dependency.PlanError
+				if err == nil || !errors.As(err, &pe) || !pe.ManagedStateUntouched {
+					t.Fatalf("rollback diagnostic: %v", err)
+				}
+				if after := transactionSnapshot(t, p); !reflect.DeepEqual(before, after) {
+					t.Fatalf("rollback changed managed state:\nbefore %v\nafter %v", before, after)
+				}
+				if failure == "gitignore" {
+					if err := os.Chmod(gitignore, 0o644); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := Add(opts, "root@2.0.0"); err != nil {
+					t.Fatalf("retry failed: %v", err)
+				}
+				m, err := manifest.Load(p.manifest)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if m.Skills["leaf"].Resolved.Version != "2.0.0" || m.Skills["extra"] == nil {
+					t.Fatal("retry did not complete")
+				}
+			})
+		}
+	}
+}
+
+func TestRollbackFailureNamesRecoveryPaths(t *testing.T) {
+	p, _, _ := transactionFixture(t, false)
+	if err := os.MkdirAll(p.skillsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p.installed = &installedState{dir: p.skillsDir, names: map[string]bool{}, deferred: true}
+	dest := filepath.Join(p.skillsDir, "leaf")
+	testutil.WriteFile(t, filepath.Join(dest, "original"), "old bytes")
+	tx, err := newApplyTransaction(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.moveAside(dest); err != nil {
+		t.Fatal(err)
+	}
+	testutil.WriteFile(t, filepath.Join(dest, "new"), "new bytes")
+	applyTestHook = func(step, path string) error {
+		if step == "rollback" && path == dest {
+			return errors.New("locked")
+		}
+		return nil
+	}
+	t.Cleanup(func() { applyTestHook = nil })
+	err = tx.rollback()
+	if err == nil || !strings.Contains(err.Error(), dest) || !strings.Contains(err.Error(), tx.moved[0].backup) || !strings.Contains(err.Error(), "manual attention") || strings.Contains(err.Error(), "no changes applied") {
+		t.Fatalf("recovery diagnostic: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(tx.moved[0].backup, "original"))
+	if err != nil || string(data) != "old bytes" {
+		t.Fatalf("backup lost: %s, %v", data, err)
+	}
+}
+
+func TestExactSourceErrorsKeepOperationContext(t *testing.T) {
+	testutil.IsolateHome(t)
+	repo := testutil.NewRepo(t)
+	testutil.Release(t, repo, "foo", "1.0.0")
+	for _, operation := range []string{"open", "fetch"} {
+		t.Run(operation, func(t *testing.T) {
+			access := &installSources{current: &manifest.Manifest{Sources: map[string]string{"demo": testutil.URL(repo)}}, opened: map[string]*source.Source{}}
+			if operation == "fetch" {
+				if _, err := access.exact("demo", ""); err != nil {
+					t.Fatal(err)
+				}
+			}
+			url := testutil.URL(filepath.Join(t.TempDir(), "missing"))
+			if operation == "open" {
+				access.current.Sources["demo"] = url
+			} else {
+				if err := os.RemoveAll(repo); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, err := access.exact("demo", "not-a-commit")
+			if err == nil || !strings.Contains(err.Error(), operation+" source demo") {
+				t.Fatalf("context: %v", err)
+			}
+		})
+	}
+}
+
+func TestFirstApplyRollbackAndRetry(t *testing.T) {
+	for _, global := range []bool{false, true} {
+		t.Run(fmt.Sprint(global), func(t *testing.T) {
+			p, opts, repo := transactionFixture(t, global)
+			transactionRelease(t, repo, "leaf", "1.0.0")
+			transactionRelease(t, repo, "root", "1.0.0", "leaf@^1")
+			before := transactionSnapshot(t, p)
+			fired := false
+			applyTestHook = func(step, path string) error {
+				if step == "rename" {
+					data, err := os.ReadFile(filepath.Join(p.skillsDir, installedFile))
+					if err != nil || !strings.Contains(string(data), filepath.Base(path)+"\n") {
+						t.Fatalf("directory published before ownership: %s, %v", data, err)
+					}
+					if filepath.Base(path) == "root" {
+						fired = true
+						return errors.New("injected root rename failure")
+					}
+				}
+				return nil
+			}
+			t.Cleanup(func() { applyTestHook = nil })
+			err := Add(opts, "root")
+			applyTestHook = nil
+			var pe *dependency.PlanError
+			if !fired || err == nil || !errors.As(err, &pe) || !pe.ManagedStateUntouched {
+				t.Fatalf("error = %v", err)
+			}
+			if !reflect.DeepEqual(before, transactionSnapshot(t, p)) {
+				t.Fatal("first install rollback changed managed state")
+			}
+			for _, dir := range []string{".agents", ".claude"} {
+				if _, err := os.Lstat(filepath.Join(p.root, dir)); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("left %s after rollback: %v", dir, err)
+				}
+			}
+			if err := Add(opts, "root"); err != nil {
+				t.Fatalf("retry: %v", err)
+			}
+		})
+	}
+}
+
+func TestFinishRollbackRestoresSymlinkedFileBytes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("project file symlink requires Windows privilege")
+	}
+	p, opts, repo := transactionFixture(t, false)
+	transactionRelease(t, repo, "foo", "1.0.0")
+	target := filepath.Join(p.root, "ignore-target")
+	testutil.WriteFile(t, target, "original ignore bytes\n")
+	if err := os.Symlink("ignore-target", filepath.Join(p.root, ".gitignore")); err != nil {
+		t.Fatal(err)
+	}
+	applyTestHook = func(step, path string) error {
+		if step == "manifest" {
+			return errors.New("manifest failure")
+		}
+		return nil
+	}
+	t.Cleanup(func() { applyTestHook = nil })
+	err := Add(opts, "foo")
+	applyTestHook = nil
+	var pe *dependency.PlanError
+	if err == nil || !errors.As(err, &pe) || !pe.ManagedStateUntouched {
+		t.Fatalf("rollback: %v", err)
+	}
+	data, err := os.ReadFile(target)
+	if err != nil || string(data) != "original ignore bytes\n" {
+		t.Fatalf("referent changed: %s, %v", data, err)
+	}
+	link, err := os.Readlink(filepath.Join(p.root, ".gitignore"))
+	if err != nil || link != "ignore-target" {
+		t.Fatalf("link changed: %s, %v", link, err)
+	}
+	if err := Add(opts, "foo"); err != nil {
+		t.Fatalf("retry: %v", err)
 	}
 }

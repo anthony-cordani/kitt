@@ -1,13 +1,17 @@
 package install
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
+	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/anthony-cordani/kitt/internal/dependency"
 	"github.com/anthony-cordani/kitt/internal/manifest"
@@ -23,17 +27,61 @@ type installSources struct {
 	restore bool
 	opened  map[string]*source.Source
 	paths   paths
+	targets map[string]bool
+	legacy  map[string]bool
+	fetched map[string]bool
+}
+
+// Pin constraints belong to the planner, allowing release search to backtrack
+// instead of treating a restore refusal as a Git access failure. The planner
+// supplies the actual target list for both install and upgrade.
+func (a *installSources) PinConstraints(targets []dependency.Target) (map[string]bool, error) {
+	explicit := map[string]bool{}
+	for _, target := range targets {
+		explicit[target.Name] = true
+	}
+	fixed := map[string]bool{}
+	for _, name := range sortedNames(a.current.Skills) {
+		s := a.current.Skills[name]
+		if s == nil || s.Resolved == nil {
+			continue
+		}
+		if a.restore {
+			fixed[name] = true
+		}
+		if !explicit[name] && s.Version != "" {
+			ok, _ := source.Satisfies(s.Version, s.Resolved.Version)
+			if !ok {
+				return nil, fmt.Errorf("skills.%s.version = %q excludes stale pin %s; clear skills.%s.resolved (the resolved block) and run kitt install again", name, s.Version, versionLabel(s.Resolved.Version, s.Resolved.Commit), name)
+			}
+		}
+	}
+	return fixed, nil
 }
 
 func (a *installSources) Releases(alias, name string) ([]dependency.Release, error) {
-	if s := a.current.Skills[name]; a.restore && s != nil && s.Resolved != nil {
-		return nil, fmt.Errorf("restore cannot move pinned %s/%s@%s to satisfy edited requirements; use an explicit install or upgrade", alias, name, versionLabel(s.Resolved.Version, s.Resolved.Commit))
+	s, err := a.refresh(alias)
+	if err != nil {
+		return nil, err
 	}
-	return a.git.Releases(alias, name)
+	pins, err := s.PublishedReleases(name)
+	if err != nil {
+		return nil, fmt.Errorf("list releases from source %s: %w", alias, err)
+	}
+	out := make([]dependency.Release, len(pins))
+	for i, pin := range pins {
+		out[i] = dependency.Release{Version: pin.Version, Commit: pin.Commit}
+	}
+	return out, nil
 }
 
 func (a *installSources) Tip(alias, name string) (dependency.Release, error) {
-	return a.git.Tip(alias, name)
+	s, err := a.refresh(alias)
+	if err != nil {
+		return dependency.Release{}, err
+	}
+	pin, err := s.BranchTip(name)
+	return dependency.Release{Version: pin.Version, Commit: pin.Commit}, err
 }
 
 func (a *installSources) exact(alias, commit string) (*source.Source, error) {
@@ -46,17 +94,34 @@ func (a *installSources) exact(alias, commit string) (*source.Source, error) {
 		var err error
 		s, err = source.Open(alias, url)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("open source %s: %w", alias, err)
 		}
 		a.opened[alias] = s
 	}
-	if !s.HasCommit(commit) {
+	if commit != "" && !s.HasCommit(commit) {
 		if err := s.Fetch(); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("fetch source %s: %w", alias, err)
 		}
 		if !s.HasCommit(commit) {
 			return nil, fmt.Errorf("commit %s not found in %s", shortCommit(commit), alias)
 		}
+	}
+	return s, nil
+}
+
+func (a *installSources) refresh(alias string) (*source.Source, error) {
+	s, err := a.exact(alias, "")
+	if err != nil {
+		return nil, err
+	}
+	if a.fetched == nil {
+		a.fetched = map[string]bool{}
+	}
+	if !a.fetched[alias] {
+		if err := s.Fetch(); err != nil {
+			return nil, fmt.Errorf("fetch source %s: %w", alias, err)
+		}
+		a.fetched[alias] = true
 	}
 	return s, nil
 }
@@ -109,11 +174,11 @@ func planAndInstall(opts Options, ref *string) (err error) {
 		}
 	}
 	access := &installSources{git: dependency.NewGitSources(m.Sources), current: m, restore: ref == nil, opened: map[string]*source.Source{}, paths: p}
-	current, aware, err := planningManifest(p, m, access)
+	current, aware, err := planningManifest(p, m, access, targets...)
 	if err != nil {
 		return err
 	}
-	plan, err := dependency.BuildPlan(dependency.Scope{Global: p.global, ManifestPath: p.manifest}, current, targets, access)
+	plan, err := buildInstallPlan(p, current, targets, access)
 	if err != nil {
 		return err
 	}
@@ -126,6 +191,9 @@ func planAndInstall(opts Options, ref *string) (err error) {
 		verb := "ok"
 		if len(targets) > 0 && n.Name == targets[0].Name {
 			verb = "added"
+			if old := m.Skills[n.Name]; old != nil && old.Resolved != nil && old.Resolved.Commit == n.Commit && staged[n.Name].dir == "" {
+				verb = "up to date"
+			}
 		} else if s := m.Skills[n.Name]; s == nil || s.Resolved == nil {
 			verb = "pinned"
 		} else if staged[n.Name].dir != "" {
@@ -166,34 +234,84 @@ func stageAndApplyPlan(p paths, m *manifest.Manifest, plan *dependency.Plan, acc
 	if err := preflightInstall(p, plan); err != nil {
 		return nil, false, err
 	}
-	staged, cleanup, err := stagePlan(p, m, plan, access)
+	if err := sweepStaging(p.skillsDir, time.Now()); err != nil {
+		return nil, false, err
+	}
+	staged, cleanup, err := stagePlan(p, m, plan, access, prune)
 	if err != nil {
 		return nil, false, err
 	}
 	defer cleanup()
 	next := plannedManifest(m, plan, staged, snapshots)
-	if err := applyStaged(p, plan, staged); err != nil {
-		return nil, true, err
+	for name := range access.legacy {
+		next.Skills[name].Resolved.Requires = nil
 	}
-	if err := finish(p, sortedNames(next.Skills), prune, out); err != nil {
-		return nil, true, err
+	tx, err := newApplyTransaction(p)
+	if err != nil {
+		return nil, false, err
 	}
+	applying = true
+	committed := false
+	defer func() {
+		if err != nil && !committed {
+			if rollbackErr := tx.rollback(); rollbackErr != nil {
+				err = errors.Join(err, rollbackErr)
+			} else {
+				applying = false
+			}
+		}
+	}()
+	// Buffer success messages until the complete transaction commits.
+	var report bytes.Buffer
 	p.installed.deferred = false
 	if p.installed.dirty {
-		if err := p.installed.save(); err != nil {
-			return nil, true, err
+		if err = p.installed.save(); err != nil {
+			return nil, applying, err
+		}
+	}
+	if err = tx.prepareFinish(p, sortedNames(next.Skills), prune, &report); err != nil {
+		return nil, applying, err
+	}
+	if err = applyStaged(p, plan, staged, tx); err != nil {
+		return nil, applying, err
+	}
+	if err = applyStep("finish", p.root); err != nil {
+		return nil, applying, err
+	}
+	if err = finish(p, sortedNames(next.Skills), prune, &report); err != nil {
+		return nil, applying, err
+	}
+	if p.installed.dirty {
+		if err = applyStep("ownership", filepath.Join(p.skillsDir, installedFile)); err != nil {
+			return nil, applying, err
+		}
+		if err = p.installed.save(); err != nil {
+			return nil, applying, err
 		}
 	}
 	if !reflect.DeepEqual(m, next) {
-		if err := next.Save(p.manifest); err != nil {
-			return nil, true, err
+		if err = applyStep("manifest", p.manifest); err != nil {
+			return nil, applying, err
+		}
+		if err = next.Save(p.manifest); err != nil {
+			return nil, applying, err
 		}
 	}
+	committed = true
+	if err = os.RemoveAll(tx.root); err != nil {
+		// The installed state is committed; partially deleted backups cannot
+		// safely be rolled back.
+		return staged, true, fmt.Errorf("installation committed; remove backup directory %s manually: %w", tx.root, err)
+	}
+	_, _ = io.Copy(out, &report)
 	return staged, true, nil
 }
 
 func installTarget(m *manifest.Manifest, p paths, text string) (dependency.Target, error) {
 	// ParseRef owns name/path validation; only CLI targets may omit a range.
+	if strings.Index(text, "@") == len(text)-1 {
+		text = strings.TrimSuffix(text, "@")
+	}
 	parsed := text
 	if !strings.Contains(text, "@") {
 		parsed += "@0.0.0"
@@ -232,7 +350,17 @@ func installTarget(m *manifest.Manifest, p paths, text string) (dependency.Targe
 
 // Populate legacy snapshots for planning, without necessarily persisting them.
 // Only hash-verified installed content is authoritative. Otherwise read the pin.
-func planningManifest(p paths, m *manifest.Manifest, access *installSources) (*manifest.Manifest, bool, error) {
+func planningManifest(p paths, m *manifest.Manifest, access *installSources, targets ...dependency.Target) (*manifest.Manifest, bool, error) {
+	access.targets = map[string]bool{}
+	access.legacy = map[string]bool{}
+	for _, target := range targets {
+		access.targets[target.Name] = true
+	}
+	if access.restore || targets != nil {
+		if _, err := access.PinConstraints(targets); err != nil {
+			return nil, false, err
+		}
+	}
 	current := &manifest.Manifest{Sources: maps.Clone(m.Sources), Skills: map[string]*manifest.Skill{}}
 	aware := false
 	for _, name := range sortedNames(m.Skills) {
@@ -243,12 +371,7 @@ func planningManifest(p paths, m *manifest.Manifest, access *installSources) (*m
 		if err := source.ValidateConstraint(s.Version); err != nil {
 			return nil, false, fmt.Errorf("skills.%s.version: %w", name, err)
 		}
-		if access.restore && s.Resolved != nil && s.Version != "" {
-			ok, _ := source.Satisfies(s.Version, s.Resolved.Version)
-			if !ok {
-				return nil, false, fmt.Errorf("skills.%s.version = %q excludes stale pin %s; clear skills.%s.resolved (the resolved block) and run kitt install again", name, s.Version, versionLabel(s.Resolved.Version, s.Resolved.Commit), name)
-			}
-		}
+
 		copy := *s
 		current.Skills[name] = &copy
 		aware = aware || s.Direct != nil || len(s.Via) > 0 || s.Resolved == nil
@@ -259,6 +382,13 @@ func planningManifest(p paths, m *manifest.Manifest, access *installSources) (*m
 		copy.Resolved = &pin
 		if pin.Requires != nil {
 			aware = true
+			continue
+		}
+		if !access.restore && targets != nil && !access.targets[name] {
+			// Unknown legacy edges outside the request must not cause source IO.
+			access.legacy[name] = true
+			empty := []string{}
+			pin.Requires = &empty
 			continue
 		}
 		match, err := hashMatches(filepath.Join(p.skillsDir, name), pin.Hash)
@@ -303,6 +433,70 @@ func planningManifest(p paths, m *manifest.Manifest, access *installSources) (*m
 		}
 	}
 	return current, aware, nil
+}
+
+// Load legacy metadata only when the requested closure actually reaches it.
+func buildInstallPlan(p paths, current *manifest.Manifest, targets []dependency.Target, access *installSources) (*dependency.Plan, error) {
+	for {
+		plan, err := dependency.BuildPlan(dependency.Scope{Global: p.global, ManifestPath: p.manifest}, current, targets, access)
+		if err != nil {
+			return nil, err
+		}
+		nodes := map[string]dependency.Node{}
+		for _, n := range plan.Nodes {
+			nodes[n.Name] = n
+		}
+		changed := false
+		seen := map[string]bool{}
+		var visit func(string) error
+		visit = func(name string) error {
+			if seen[name] {
+				return nil
+			}
+			seen[name] = true
+			if access.legacy[name] {
+				s := current.Skills[name]
+				raw, err := pinnedRequirements(p, s, name, access)
+				if err != nil {
+					return err
+				}
+				s.Resolved.Requires = &raw
+				delete(access.legacy, name)
+				changed = true
+			}
+			for _, text := range nodes[name].Requires {
+				r, _ := dependency.ParseRef(text)
+				if err := visit(r.Name); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+		for _, target := range targets {
+			if err := visit(target.Name); err != nil {
+				return nil, err
+			}
+		}
+		if !changed {
+			return plan, nil
+		}
+	}
+}
+
+func pinnedRequirements(p paths, s *manifest.Skill, name string, access *installSources) ([]string, error) {
+	match, err := hashMatches(filepath.Join(p.skillsDir, name), s.Resolved.Hash)
+	if err != nil {
+		return nil, err
+	}
+	if match {
+		meta, err := skill.Validate(filepath.Join(p.skillsDir, name))
+		if err != nil {
+			return nil, err
+		}
+		return append([]string{}, meta.Requires...), nil
+	}
+	raw, err := access.Requires(s.Source, name, s.Resolved.Commit)
+	return append([]string{}, raw...), err
 }
 
 func plannedManifest(m *manifest.Manifest, plan *dependency.Plan, staged map[string]stagedSkill, snapshots bool) *manifest.Manifest {
