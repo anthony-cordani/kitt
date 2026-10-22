@@ -64,7 +64,7 @@ func Check(url string) error {
 
 // Fetch updates the cached clone from the remote.
 func (s *Source) Fetch() error {
-	if _, err := runGit("-C", s.dir, "fetch", "--quiet", "--prune", "--tags", "origin", "+refs/heads/*:refs/heads/*"); err != nil {
+	if _, err := runGit("-C", s.dir, "fetch", "--quiet", "--prune", "--tags", "origin", "+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*"); err != nil {
 		return err
 	}
 	out, err := runGit("-C", s.dir, "ls-remote", "--symref", "--", "origin", "HEAD")
@@ -303,6 +303,26 @@ func (s *Source) requireSkill(skill, commit string) error {
 	return nil
 }
 
+// ValidateConstraint checks the version grammar: empty (latest), exact X.Y.Z, or ^X[.Y[.Z]].
+func ValidateConstraint(s string) error {
+	_, err := parseConstraint(s)
+	return err
+}
+
+// Satisfies reports whether a plain X.Y.Z release version matches constraint.
+// Caret ranges accept the same major at or above their floor, including major zero.
+func Satisfies(constraint, version string) (bool, error) {
+	c, err := parseConstraint(constraint)
+	if err != nil {
+		return false, err
+	}
+	v, err := parseConstraint(version)
+	if err != nil || v.exact == "" {
+		return false, fmt.Errorf("invalid version %q", version)
+	}
+	return c.contains(version), nil
+}
+
 // constraint is the accepted version grammar: latest, exact X.Y.Z, or ^X[.Y[.Z]].
 type constraint struct {
 	latest bool
@@ -364,17 +384,24 @@ func (c constraint) match(versions []string) (string, bool) {
 	var best string
 	found := false
 	for _, v := range versions {
-		sv := "v" + v
-		if semver.Major(sv) != "v"+c.major {
-			continue
-		}
-		if semver.Compare(sv, c.floor) < 0 {
+		if !c.contains(v) {
 			continue
 		}
 		best = v
 		found = true
 	}
 	return best, found
+}
+
+func (c constraint) contains(version string) bool {
+	if c.latest {
+		return true
+	}
+	if !c.caret {
+		return version == c.exact
+	}
+	v := "v" + version
+	return semver.Major(v) == "v"+c.major && semver.Compare(v, c.floor) >= 0
 }
 
 func validNumber(s string) bool {

@@ -11,7 +11,10 @@ import (
 
 	"golang.org/x/mod/semver"
 
+	"github.com/anthony-cordani/kitt/internal/dependency"
+	"github.com/anthony-cordani/kitt/internal/manifest"
 	"github.com/anthony-cordani/kitt/internal/skill"
+	"github.com/anthony-cordani/kitt/internal/source"
 )
 
 // Options configures a release.
@@ -93,6 +96,9 @@ func Release(opts Options, name string) error {
 			return fmt.Errorf("version %s is not greater than the last release %s: bump metadata.version in skills/%s/SKILL.md", meta.Version, last, name)
 		}
 	}
+	if err := validateRequirements(root, opts.Remote, meta); err != nil {
+		return &requirementError{err}
+	}
 	tag := name + "/v" + meta.Version
 	if _, err := runGit(root, "tag", "-a", "-m", name+" "+meta.Version, tag); err != nil {
 		return err
@@ -108,6 +114,107 @@ func Release(opts Options, name string) error {
 	fmt.Fprintf(out, "released %s %s (%s)\n", name, meta.Version, tag)
 	return nil
 }
+
+// requirementError leaves the command prefix to the CLI, as other release
+// errors do, while preserving structured dependency errors for callers.
+type requirementError struct{ error }
+
+func (e *requirementError) Error() string {
+	text := strings.TrimPrefix(e.error.Error(), "kitt release: ")
+	return strings.ReplaceAll(text, "project scope", "release scope") + "\n  no release tag created"
+}
+
+func (e *requirementError) Unwrap() error { return e.error }
+
+func validateRequirements(root, remote string, meta skill.Meta) error {
+	path := filepath.Join(root, manifest.FileName)
+	scope := dependency.Scope{Command: "release", ManifestPath: path}
+	if len(meta.Requires) == 0 {
+		return nil
+	}
+	aliases := map[string]string{remote: ""}
+	var configured map[string]string
+	var requirements []string
+	access := &releaseSources{root: root, urls: make(map[string]string), opened: make(map[string]*source.Source), versions: make(map[string]string), published: make(map[string][]dependency.Release)}
+	for i, text := range meta.Requires {
+		ref, err := dependency.ParseRef(text)
+		// ParseRef applies skill.ValidName; staging additionally reserves kitt-.
+		if err == nil && strings.HasPrefix(ref.Name, "kitt-") {
+			err = fmt.Errorf("skill %s: skill names starting with kitt- are reserved", ref.Name)
+		}
+		if err != nil {
+			return &dependency.ValidationError{
+				Location: fmt.Sprintf("%s/%s@%s %s in %s (project scope)", remote, meta.Name, meta.Version, meta.RequirementLocation(i), filepath.Join(root, "skills", meta.Name, "SKILL.md")),
+				Err:      err,
+			}
+		}
+		bare := ref.Source == ""
+		ref = ref.WithDefaultSource(remote)
+		request := dependency.Requirement{Ref: ref, Requester: meta.Name, Source: remote, Version: meta.Version, Index: i}
+		url := ""
+		if bare {
+			url, err = releaseRemoteURL(root, remote)
+			if err != nil {
+				return fmt.Errorf("%s/%s@%s requires %q: %w", remote, meta.Name, meta.Version, text, err)
+			}
+		} else {
+			if configured == nil {
+				m, err := manifest.Load(path)
+				if err != nil && !errors.Is(err, fs.ErrNotExist) {
+					return fmt.Errorf("%s/%s@%s requires %q in project scope: %w", remote, meta.Name, meta.Version, text, err)
+				}
+				configured = map[string]string{}
+				if m != nil {
+					configured = m.Sources
+				}
+			}
+			var ok bool
+			url, ok = configured[ref.Source]
+			if !ok {
+				cause := &dependency.UnknownSourceError{Scope: scope, Alias: ref.Source, Requirement: request}
+				return &requirementDiagnostic{cause, fmt.Sprintf("unknown source alias %q\n  required by %s/%s@%s: %q\n  add [sources].%s = \"<repository-url>\" to %s at the skills repository root", ref.Source, remote, meta.Name, meta.Version, ref.String(), ref.Source, path)}
+			}
+			url = repositoryURL(root, url)
+		}
+		aliases[ref.Source] = url
+		// A qualified alias may share the remote's name. Keep the access URL
+		// per skill so bare references still use the selected remote.
+		access.urls[ref.Source+"/"+ref.Name] = url
+		requirements = append(requirements, ref.String())
+	}
+	commit, err := gitTrim(root, "rev-parse", "HEAD")
+	if err != nil {
+		return err
+	}
+	current := &manifest.Manifest{Sources: aliases, Skills: map[string]*manifest.Skill{
+		meta.Name: {Source: remote, Resolved: &manifest.Resolved{Version: meta.Version, Commit: commit, Requires: &requirements}},
+	}}
+	_, err = dependency.BuildPlan(scope, current, nil, access)
+	var conflict *dependency.ConflictError
+	if errors.As(err, &conflict) && conflict.Reason == dependency.NoMatchingRelease && len(conflict.Requests) == 1 {
+		r := conflict.Requests[0]
+		var versions []string
+		for _, release := range access.published[r.Ref.Source+"/"+r.Ref.Name] {
+			versions = append(versions, release.Version)
+		}
+		return &requirementDiagnostic{err, fmt.Sprintf("no published release of %s/%s matches %s\n  required by %s/%s@%s\n  published: %s", r.Ref.Source, r.Ref.Name, r.Ref.Constraint, r.Source, r.Requester, r.Version, strings.Join(versions, ", "))}
+	}
+	var sourceErr *dependency.AccessError
+	if errors.As(err, &sourceErr) {
+		return fmt.Errorf("%s/%s@%s requirements in project scope: %w", remote, meta.Name, meta.Version, err)
+	}
+	return err
+}
+
+// Keep structured planner errors available to callers while giving release its
+// own recovery instructions and single-range diagnostic.
+type requirementDiagnostic struct {
+	err     error
+	message string
+}
+
+func (e *requirementDiagnostic) Error() string { return e.message }
+func (e *requirementDiagnostic) Unwrap() error { return e.err }
 
 func repoRoot(dir string) (string, error) {
 	root, err := gitTrim(dir, "rev-parse", "--show-toplevel")

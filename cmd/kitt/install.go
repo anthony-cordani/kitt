@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/anthony-cordani/kitt/internal/dependency"
 	"github.com/anthony-cordani/kitt/internal/install"
 )
 
@@ -74,6 +75,11 @@ func installCmd(args []string, stdout, stderr io.Writer) int {
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "kitt install: %v\n", err)
+		var planErr *dependency.PlanError
+		// Source flags are applied separately, before the install plan.
+		if len(sources) == 0 && errors.As(err, &planErr) && planErr.ManagedStateUntouched {
+			fmt.Fprintln(stderr, "  no changes applied")
+		}
 		return 1
 	}
 	return 0

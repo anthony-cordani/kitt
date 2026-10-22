@@ -10,6 +10,29 @@ import (
 	"testing"
 )
 
+// StatLink Lstats path. link is true when path is a symlink or a Windows junction.
+// Junctions are ModeSymlink or ModeIrregular depending on the Go version.
+// target comes from os.Readlink, or from filepath.EvalSymlinks when Readlink fails.
+// Callers must not read a directory or a reparse point as a file.
+func StatLink(path string) (info os.FileInfo, target string, link bool, err error) {
+	info, err = os.Lstat(path)
+	if err != nil {
+		return nil, "", false, err
+	}
+	mode := info.Mode()
+	if mode&os.ModeSymlink == 0 && mode&os.ModeIrregular == 0 {
+		return info, "", false, nil
+	}
+	target, err = os.Readlink(path)
+	if err != nil {
+		target, err = filepath.EvalSymlinks(path)
+		if err != nil {
+			return info, "", true, err
+		}
+	}
+	return info, target, true, nil
+}
+
 // IsolateHome points every user directory kitt reads (home, cache, config) at a fresh temp dir,
 // so tests never touch the real user cache or skills. It returns that home directory.
 func IsolateHome(t testing.TB) string {

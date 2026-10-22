@@ -17,7 +17,10 @@ import (
 type Meta struct {
 	Name        string
 	Description string
-	Version     string // metadata.version, "" when absent
+	Version     string   // metadata.version, "" when absent
+	Requires    []string // metadata.requires, nil when absent
+
+	requiresLine int // String form's location, including the opening delimiter.
 }
 
 // ParseFile reads a SKILL.md file and returns its frontmatter.
@@ -31,18 +34,144 @@ func ParseFile(path string) (Meta, error) {
 		return Meta{}, fmt.Errorf("parse skill file: %w", err)
 	}
 	var doc struct {
-		Name        string            `yaml:"name"`
-		Description string            `yaml:"description"`
-		Metadata    map[string]string `yaml:"metadata"`
+		Name        string               `yaml:"name"`
+		Description string               `yaml:"description"`
+		Metadata    map[string]yaml.Node `yaml:"metadata"`
 	}
 	if err := yaml.Unmarshal(raw, &doc); err != nil {
 		return Meta{}, fmt.Errorf("parse skill frontmatter: %w", err)
 	}
 	meta := Meta{Name: doc.Name, Description: doc.Description}
-	if doc.Metadata != nil {
-		meta.Version = doc.Metadata["version"]
+	if node, ok := doc.Metadata["version"]; ok {
+		var value string
+		if err := node.Decode(&value); err != nil {
+			return Meta{}, fmt.Errorf("parse skill frontmatter %q: metadata.version at line %d: must be a string", path, node.Line+1)
+		}
+		meta.Version = value
+	}
+	meta.Requires, err = parseRequirements(path, doc.Metadata["requires"])
+	if err != nil {
+		return Meta{}, &RequiresDecodeError{Err: err}
+	}
+	node := doc.Metadata["requires"]
+	if node.Kind == yaml.AliasNode {
+		node = *node.Alias
+	}
+	if node.Kind == yaml.ScalarNode && node.Tag == "!!str" {
+		meta.requiresLine = node.Line + 1
 	}
 	return meta, nil
+}
+
+// RequirementLocation identifies an entry for reference validation diagnostics.
+// Sequence entries retain their existing zero-based index notation.
+func (m Meta) RequirementLocation(i int) string {
+	if m.requiresLine != 0 {
+		return fmt.Sprintf("metadata.requires entry %d %q at line %d", i+1, m.Requires[i], m.requiresLine)
+	}
+	return fmt.Sprintf("metadata.requires[%d]", i)
+}
+
+// RequiresDecodeError identifies errors decoding metadata.requires, so callers
+// can tolerate foreign dependency formats without hiding other frontmatter errors.
+type RequiresDecodeError struct{ Err error }
+
+func (e *RequiresDecodeError) Error() string { return e.Err.Error() }
+func (e *RequiresDecodeError) Unwrap() error { return e.Err }
+
+func parseRequirements(path string, node yaml.Node) ([]string, error) {
+	if node.Kind == 0 {
+		return nil, nil
+	}
+	line := node.Line + 1 // Include the opening frontmatter delimiter in file locations.
+	if node.Kind == yaml.AliasNode {
+		node = *node.Alias
+	}
+	if node.Kind == yaml.ScalarNode && node.Tag == "!!str" {
+		return append([]string{}, strings.Fields(node.Value)...), nil
+	}
+	if node.Kind != yaml.SequenceNode {
+		return nil, fmt.Errorf("parse skill frontmatter %q: metadata.requires at line %d: must be a string or sequence of strings", path, line)
+	}
+	requires := make([]string, len(node.Content))
+	for i, item := range node.Content {
+		line := item.Line + 1
+		if item.Kind == yaml.AliasNode {
+			item = item.Alias
+		}
+		if item.Kind != yaml.ScalarNode || item.Tag != "!!str" {
+			return nil, fmt.Errorf("parse skill frontmatter %q: metadata.requires[%d] at line %d: must be a string", path, i, line)
+		}
+		requires[i] = item.Value
+	}
+	return requires, nil
+}
+
+// ForeignRequires reports whether SKILL.md metadata.requires is outside kitt's
+// format. A string is kitt-shaped when at least one whitespace-separated token
+// contains "@". A YAML sequence is kitt-shaped when empty or when at least one
+// string entry contains "@", even if other entries are invalid. All other values are
+// foreign. Absent metadata.requires is not foreign. An unreadable file or
+// frontmatter returns an error.
+func ForeignRequires(path string) (bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false, err
+	}
+	raw, err := frontmatter(data)
+	if err != nil {
+		return false, err
+	}
+	var doc struct {
+		Metadata map[string]yaml.Node `yaml:"metadata"`
+	}
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		return false, err
+	}
+	node, ok := doc.Metadata["requires"]
+	if !ok || node.Kind == 0 {
+		return false, nil
+	}
+	return foreignRequiresValue(node), nil
+}
+
+func foreignRequiresValue(node yaml.Node) bool {
+	if node.Kind == yaml.AliasNode {
+		if node.Alias == nil {
+			return true
+		}
+		node = *node.Alias
+	}
+	if node.Kind == yaml.ScalarNode && node.Tag == "!!str" {
+		for _, entry := range strings.Fields(node.Value) {
+			if strings.Contains(entry, "@") {
+				return false
+			}
+		}
+		return true
+	}
+	if node.Kind != yaml.SequenceNode {
+		return true
+	}
+	if len(node.Content) == 0 {
+		return false
+	}
+	for _, item := range node.Content {
+		if item == nil {
+			continue
+		}
+		n := *item
+		if n.Kind == yaml.AliasNode {
+			if n.Alias == nil {
+				continue
+			}
+			n = *n.Alias
+		}
+		if n.Kind == yaml.ScalarNode && n.Tag == "!!str" && strings.Contains(n.Value, "@") {
+			return false
+		}
+	}
+	return true
 }
 
 // ValidName reports whether name follows the Agent Skills naming rules.

@@ -34,177 +34,12 @@ type Options struct {
 
 // Restore installs every skill of the manifest exactly as pinned, pinning entries that are not yet resolved.
 func Restore(opts Options) error {
-	p, err := locate(opts)
-	if err != nil {
-		return err
-	}
-	m, err := load(p)
-	if err != nil {
-		return err
-	}
-	if err := validateManifestNames(m); err != nil {
-		return err
-	}
-	p.installed, err = readInstalled(p, m)
-	if err != nil {
-		return err
-	}
-	out := outputOf(opts.Out)
-	dirty := false
-	for _, name := range sortedNames(m.Skills) {
-		if err := p.installed.adopt(name, m.Skills[name]); err != nil {
-			return err
-		}
-		if err := p.installed.check(name); err != nil {
-			return err
-		}
-		sk := m.Skills[name]
-		if sk == nil {
-			return fmt.Errorf("skill %s: nil manifest entry", name)
-		}
-		url, ok := m.Sources[sk.Source]
-		if !ok {
-			return fmt.Errorf("skill %s: unknown source %s", name, sk.Source)
-		}
-		if sk.Resolved == nil {
-			src, err := openFetch(sk.Source, url)
-			if err != nil {
-				return err
-			}
-			resolved, err := src.Resolve(name, sk.Version)
-			if err != nil {
-				return fmt.Errorf("resolve skill %s: %w", name, err)
-			}
-			sum, err := installAt(p, name, resolved.Commit, "", src)
-			if err != nil {
-				return err
-			}
-			if sk.Version == "" && resolved.Version != "" {
-				sk.Version = "^" + resolved.Version
-			}
-			sk.Resolved = &manifest.Resolved{
-				Version: resolved.Version,
-				Commit:  resolved.Commit,
-				Hash:    sum,
-			}
-			dirty = true
-			fmt.Fprintf(out, "pinned %s %s\n", name, versionLabel(sk.Resolved.Version, sk.Resolved.Commit))
-			continue
-		}
-		dest := filepath.Join(p.skillsDir, name)
-		match, err := hashMatches(dest, sk.Resolved.Hash)
-		if err != nil {
-			return err
-		}
-		if match {
-			fmt.Fprintf(out, "ok %s %s\n", name, versionLabel(sk.Resolved.Version, sk.Resolved.Commit))
-			continue
-		}
-		src, err := source.Open(sk.Source, url)
-		if err != nil {
-			return fmt.Errorf("open source %s: %w", sk.Source, err)
-		}
-		if !src.HasCommit(sk.Resolved.Commit) {
-			if err := src.Fetch(); err != nil {
-				return fmt.Errorf("fetch source %s: %w", sk.Source, err)
-			}
-			if !src.HasCommit(sk.Resolved.Commit) {
-				return fmt.Errorf("skill %s: commit %s not found in %s", name, shortCommit(sk.Resolved.Commit), sk.Source)
-			}
-		}
-		if _, err := installAt(p, name, sk.Resolved.Commit, sk.Resolved.Hash, src); err != nil {
-			return err
-		}
-		fmt.Fprintf(out, "installed %s %s\n", name, versionLabel(sk.Resolved.Version, sk.Resolved.Commit))
-	}
-	if err := finish(p, sortedNames(m.Skills), true, out); err != nil {
-		return err
-	}
-	if dirty {
-		if err := m.Save(p.manifest); err != nil {
-			return err
-		}
-	}
-	return nil
+	return planAndInstall(opts, nil)
 }
 
-// Add resolves ref ("[source/]skill[@constraint]"), pins it in the manifest and installs it.
+// Add resolves ref ("[source/]skill[@constraint]"), plans its closure, and installs it.
 func Add(opts Options, ref string) error {
-	p, err := locate(opts)
-	if err != nil {
-		return err
-	}
-	m, err := load(p)
-	if err != nil {
-		return err
-	}
-	if err := validateManifestNames(m); err != nil {
-		return err
-	}
-	p.installed, err = readInstalled(p, m)
-	if err != nil {
-		return err
-	}
-	alias, name, constraint := parseRef(ref)
-	if alias == "" {
-		switch len(m.Sources) {
-		case 0:
-			return fmt.Errorf("no source in %s: add a [sources] table", p.manifest)
-		case 1:
-			for key := range m.Sources {
-				alias = key
-			}
-		default:
-			return fmt.Errorf("several sources: use <source>/<skill>")
-		}
-	}
-	url, ok := m.Sources[alias]
-	if !ok {
-		return fmt.Errorf("unknown source %s", alias)
-	}
-	if err := skill.ValidName(name); err != nil {
-		return err
-	}
-	if strings.HasPrefix(name, "kitt-") {
-		return fmt.Errorf("skill names starting with kitt- are reserved")
-	}
-	if err := p.installed.check(name); err != nil {
-		return err
-	}
-	src, err := openFetch(alias, url)
-	if err != nil {
-		return err
-	}
-	resolved, err := src.Resolve(name, constraint)
-	if err != nil {
-		return fmt.Errorf("resolve skill %s: %w", name, err)
-	}
-	sum, err := installAt(p, name, resolved.Commit, "", src)
-	if err != nil {
-		return err
-	}
-	version := constraint
-	if constraint == "" && resolved.Version != "" {
-		version = "^" + resolved.Version
-	}
-	m.Skills[name] = &manifest.Skill{
-		Source:  alias,
-		Version: version,
-		Resolved: &manifest.Resolved{
-			Version: resolved.Version,
-			Commit:  resolved.Commit,
-			Hash:    sum,
-		},
-	}
-	if err := m.Save(p.manifest); err != nil {
-		return err
-	}
-	out := outputOf(opts.Out)
-	fmt.Fprintf(out, "added %s %s\n", name, versionLabel(resolved.Version, resolved.Commit))
-	if err := finish(p, sortedNames(m.Skills), false, out); err != nil {
-		return err
-	}
-	return nil
+	return planAndInstall(opts, &ref)
 }
 
 // AddSources adds sources to the target's kitt.toml: the user-level one with -g, created when it
@@ -324,61 +159,6 @@ func openFetch(alias, url string) (*source.Source, error) {
 	return src, nil
 }
 
-// installAt extracts commit into the skills directory.
-// expected is checked when non-empty. The returned hash is the installed tree.
-func installAt(p paths, name, commit, expected string, src *source.Source) (string, error) {
-	// ValidName before the name is joined onto a path.
-	if err := skill.ValidName(name); err != nil {
-		return "", err
-	}
-	if err := p.installed.check(name); err != nil {
-		return "", err
-	}
-	skillsDir := p.skillsDir
-	if err := os.MkdirAll(skillsDir, 0o755); err != nil {
-		return "", fmt.Errorf("create skills dir: %w", err)
-	}
-	dest := filepath.Join(skillsDir, name)
-	tmp := filepath.Join(skillsDir, tempPrefix+name)
-	if err := os.RemoveAll(tmp); err != nil {
-		return "", fmt.Errorf("remove temp dir: %w", err)
-	}
-	if err := src.Extract(name, commit, tmp); err != nil {
-		os.RemoveAll(tmp)
-		return "", fmt.Errorf("extract skill %s: %w", name, err)
-	}
-	meta, err := skill.ParseFile(filepath.Join(tmp, "SKILL.md"))
-	if err != nil {
-		os.RemoveAll(tmp)
-		return "", fmt.Errorf("skill %s: %w", name, err)
-	}
-	if meta.Name != name {
-		os.RemoveAll(tmp)
-		return "", fmt.Errorf("skill %s: SKILL.md declares name %s", name, meta.Name)
-	}
-	sum, err := skill.Hash(tmp)
-	if err != nil {
-		os.RemoveAll(tmp)
-		return "", fmt.Errorf("skill %s: %w", name, err)
-	}
-	if expected != "" && sum != expected {
-		os.RemoveAll(tmp)
-		return "", fmt.Errorf("skill %s: hash mismatch (kitt.toml pins %s, source gives %s)", name, expected, sum)
-	}
-	if err := os.RemoveAll(dest); err != nil {
-		os.RemoveAll(tmp)
-		return "", fmt.Errorf("remove skill %s: %w", name, err)
-	}
-	if err := os.Rename(tmp, dest); err != nil {
-		os.RemoveAll(tmp)
-		return "", fmt.Errorf("install skill %s: %w", name, err)
-	}
-	if err := p.installed.add(name); err != nil {
-		return "", err
-	}
-	return sum, nil
-}
-
 func hashMatches(dest, want string) (bool, error) {
 	info, err := os.Lstat(dest)
 	if err != nil {
@@ -395,21 +175,6 @@ func hashMatches(dest, want string) (bool, error) {
 		return false, fmt.Errorf("hash skill %s: %w", filepath.Base(dest), err)
 	}
 	return got == want, nil
-}
-
-// parseRef splits "[source/]skill[@constraint]" on the first '/' and the first '@'.
-func parseRef(ref string) (alias, name, constraint string) {
-	rest := ref
-	if i := strings.Index(ref, "/"); i >= 0 {
-		alias = ref[:i]
-		rest = ref[i+1:]
-	}
-	name = rest
-	if i := strings.Index(rest, "@"); i >= 0 {
-		name = rest[:i]
-		constraint = rest[i+1:]
-	}
-	return alias, name, constraint
 }
 
 func versionLabel(version, commit string) string {
@@ -487,6 +252,7 @@ func createLink(p paths, link, dest, name string) error {
 			return err
 		}
 		cmd := exec.Command("cmd", "/c", "mklink", "/J", link, abs)
+		configureJunctionCommand(cmd, link, abs)
 		msg, err := cmd.CombinedOutput()
 		if err != nil {
 			text := strings.TrimSpace(string(msg))
@@ -743,4 +509,10 @@ func validateJunctionPaths(link, target string) error {
 		return fmt.Errorf("cannot create a junction for a path containing one of & | < > ^ %% ! \"")
 	}
 	return nil
+}
+
+// cmd.exe treats '=' as a separator in unquoted arguments. Quote both native,
+// absolute paths even when Go's ordinary argument quoting would omit quotes.
+func junctionCommandLine(link, target string) string {
+	return fmt.Sprintf(`cmd /c mklink /J "%s" "%s"`, link, target)
 }

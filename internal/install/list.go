@@ -10,7 +10,9 @@ import (
 	"sort"
 	"text/tabwriter"
 
+	"github.com/anthony-cordani/kitt/internal/dependency"
 	"github.com/anthony-cordani/kitt/internal/manifest"
+	"github.com/anthony-cordani/kitt/internal/skill"
 )
 
 // List prints the installed skills and the skills available in each source.
@@ -31,8 +33,10 @@ func List(opts Options) error {
 	names := sortedNames(m.Skills)
 	if len(names) == 0 {
 		fmt.Fprintln(out, "  (none)")
-	} else if err := writeInstalled(out, p.skillsDir, m.Skills, names); err != nil {
-		return err
+	} else {
+		if err := writeDependencyTree(out, p.skillsDir, m, names); err != nil {
+			return err
+		}
 	}
 	aliases := make([]string, 0, len(m.Sources))
 	for alias := range m.Sources {
@@ -45,6 +49,190 @@ func List(opts Options) error {
 		}
 	}
 	return nil
+}
+
+func dependencyAware(m *manifest.Manifest) bool {
+	for _, s := range m.Skills {
+		if s != nil && (s.Direct != nil || s.Via != nil || s.Resolved != nil && s.Resolved.Requires != nil) {
+			return true
+		}
+	}
+	return false
+}
+
+func writeDependencyTree(out io.Writer, skillsDir string, m *manifest.Manifest, names []string) error {
+	var nodes []dependency.Node
+	hasDependencies := false
+	children := make(map[string][]dependency.Ref)
+	labels := make(map[string]string)
+	known := make(map[string]bool)
+	for _, name := range names {
+		s := m.Skills[name]
+		if s == nil {
+			return fmt.Errorf("skill %s: nil manifest entry", name)
+		}
+		label, err := installedLabel(skillsDir, name, s)
+		if err != nil {
+			return err
+		}
+		labels[name] = label
+		n := dependency.Node{Name: name, Source: s.Source, Direct: s.IsDirect()}
+		if s.Resolved != nil {
+			n.Version, n.Commit = s.Resolved.Version, s.Resolved.Commit
+			if label == "not installed" {
+				labels[name] = versionLabel(n.Version, n.Commit) + " [not installed]"
+			}
+			if s.Resolved.Requires != nil {
+				n.Requires = *s.Resolved.Requires
+				known[name] = true
+			} else {
+				match, err := hashMatches(filepath.Join(skillsDir, name), s.Resolved.Hash)
+				if err != nil {
+					return err
+				}
+				if match {
+					meta, err := skill.ParseFile(filepath.Join(skillsDir, name, "SKILL.md"))
+					if err == nil {
+						n.Requires = meta.Requires
+						known[name] = true
+					}
+				}
+			}
+		}
+		var problems []error
+		n.Requires, problems = diagnosticRequirements(s.Source, n.Requires)
+		if len(problems) > 0 && s.Resolved != nil && s.Resolved.Requires == nil {
+			known[name] = false
+		}
+		for _, text := range n.Requires {
+			r, _ := dependency.ParseSnapshotRef(text)
+			children[name] = append(children[name], r)
+		}
+		hasDependencies = hasDependencies || len(n.Requires) > 0 || len(s.Via) > 0 || !s.IsDirect()
+		nodes = append(nodes, n)
+	}
+	// Empty snapshots alone do not change main's flat format. Retained
+	// transitive entries still need the orphan section after the last edge goes.
+	if !hasDependencies {
+		return writeInstalled(out, skillsDir, m.Skills, names)
+	}
+	graph := dependency.AnalyzeGraph(nodes)
+	shown := make(map[string]bool)
+	var write func(string, string, string, string)
+	write = func(name, prefix, branch, requested string) {
+		s := m.Skills[name]
+		if s == nil {
+			fmt.Fprintf(out, "%s%s%s (missing entry)\n", prefix, branch, requested)
+			return
+		}
+		line := fmt.Sprintf("%s/%s@%s", s.Source, name, labels[name])
+		if requested != "" {
+			r, _ := dependency.ParseSnapshotRef(requested)
+			line += " (requires " + r.Constraint + ")"
+		} else if s.Version != "" {
+			line += " (requested " + s.Version + ")"
+		}
+		if s.IsDirect() && len(graph.Via[name]) > 0 {
+			line += " [direct]"
+		}
+		if shown[name] {
+			fmt.Fprintf(out, "%s%s%s [already shown]\n", prefix, branch, line)
+			return
+		}
+		fmt.Fprintf(out, "%s%s%s\n", prefix, branch, line)
+		shown[name] = true
+		if branch == "|-- " {
+			prefix += "|   "
+		} else if branch != "" {
+			prefix += "    "
+		}
+		for i, r := range children[name] {
+			branch := "|-- "
+			if i == len(children[name])-1 {
+				branch = "`-- "
+			}
+			write(r.Name, prefix, branch, r.String())
+		}
+	}
+	for _, name := range names {
+		if m.Skills[name].IsDirect() {
+			write(name, "  ", "", "")
+		}
+	}
+	if listReachabilityIncomplete(names, m, known, graph.Orphans) {
+		fmt.Fprintln(out, "Dependency information incomplete; transitive reachability is unknown:")
+	} else if len(graph.Orphans) > 0 {
+		fmt.Fprintln(out, "Orphaned transitive skills:")
+	}
+	if len(graph.Orphans) > 0 {
+		// Start detached subtrees at their roots, even when a child sorts first.
+		for _, name := range graph.Orphans {
+			if len(graph.Via[name]) == 0 {
+				write(name, "  ", "", "")
+			}
+		}
+		for _, name := range graph.Orphans {
+			if !shown[name] { // also covers detached cycles
+				write(name, "  ", "", "")
+			}
+		}
+	}
+	return nil
+}
+
+// listReachabilityIncomplete is true only when the orphan section would list
+// at least one transitive skill whose reachability cannot be decided.
+// Unresolved entries and direct roots are not evidence either way.
+func listReachabilityIncomplete(names []string, m *manifest.Manifest, known map[string]bool, orphans []string) bool {
+	if len(orphans) == 0 {
+		return false
+	}
+	orphan := make(map[string]bool, len(orphans))
+	for _, name := range orphans {
+		orphan[name] = true
+	}
+	for _, name := range names {
+		s := m.Skills[name]
+		if s == nil || s.Resolved == nil || s.IsDirect() {
+			continue
+		}
+		if !known[name] && !orphan[name] {
+			return true
+		}
+		if !orphan[name] {
+			continue
+		}
+		for _, parent := range s.Via {
+			parentSkill := m.Skills[parent]
+			if parentSkill != nil && parentSkill.Resolved != nil && !known[parent] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// diagnosticRequirements shares reference normalization between list and doctor.
+// Keep valid edges even when a hand-edited snapshot contains malformed entries.
+func diagnosticRequirements(alias string, raw []string) ([]string, []error) {
+	var valid []string
+	var problems []error
+	for i, text := range raw {
+		normalized, err := dependency.NormalizeRequirements([]string{text}, alias, true)
+		if err != nil {
+			var validation *dependency.ValidationError
+			if errors.As(err, &validation) {
+				err = validation.Err
+			}
+			problems = append(problems, fmt.Errorf("requires[%d]: %w", i, err))
+			continue
+		}
+		valid = append(valid, normalized...)
+	}
+	// Valid entries are normalized together for the same sorting and deduplication
+	// as the planner, without losing good edges beside a malformed entry.
+	normalized, _ := dependency.NormalizeRequirements(valid, alias, true)
+	return normalized, problems
 }
 
 func writeInstalled(out io.Writer, skillsDir string, skills map[string]*manifest.Skill, names []string) error {

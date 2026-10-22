@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/anthony-cordani/kitt/internal/dependency"
 	"github.com/anthony-cordani/kitt/internal/install"
 )
 
@@ -53,6 +54,10 @@ func upgradeCmd(args []string, stdout, stderr io.Writer) int {
 	opts := install.Options{Global: *global, Root: root, Out: stdout}
 	if err := install.Upgrade(opts, fs.Arg(0), *major); err != nil {
 		fmt.Fprintf(stderr, "kitt upgrade: %v\n", err)
+		var planErr *dependency.PlanError
+		if errors.As(err, &planErr) && planErr.ManagedStateUntouched {
+			fmt.Fprintln(stderr, "  no changes applied")
+		}
 		return 1
 	}
 	return 0

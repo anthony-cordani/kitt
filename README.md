@@ -59,9 +59,9 @@ kitt never overwrites a file it did not create. On a project that already has an
 | `kitt init [--source alias=url]…` | Writes the missing project files, installs the git hooks, installs the skills. Without `--source`, asks for the skills repositories and checks that git can reach them. |
 | `kitt install` | Restores every skill exactly as pinned in `kitt.toml`. Fast and offline when nothing changed. |
 | `kitt install [source/]skill[@constraint]` | Adds a skill and pins it. The source can be omitted when `kitt.toml` has only one. |
-| `kitt upgrade [skill] [--major]` | Moves skills to their newest release in the same major version, showing the diff of each skill. `--major` allows a new major version. Exact pins (`1.2.0`) are kept. |
+| `kitt upgrade [skill] [--major]` | Moves skills to their newest release in the same major version, showing the diff of each skill. `--major` allows a new major version. Also moves transitive dependencies within their dependents' ranges. Exact pins (`1.2.0`) are kept. |
 | `kitt list` | Installed skills, and the skills available in each source with their latest release. |
-| `kitt doctor` | Reports drift: skill modified locally, missing link, outdated `.gitignore` block or docs index, stale project docs. Exit code 2 when something is wrong. Changes nothing. |
+| `kitt doctor` | Reports drift: skill modified locally, missing link, outdated `.gitignore` block or docs index, stale project docs. Also checks dependency pins, sources, cycles, snapshots, `via` and orphans. Exit code 2 when something is wrong. Changes nothing. |
 | `kitt release <skill>` | In a skills repository: tags and pushes a new version of a skill (see below). |
 | `kitt --version` | Prints the installed version. |
 
@@ -75,7 +75,44 @@ kitt never overwrites a file it did not create. On a project that already has an
 | `^1`, `^1.2`, `^1.2.3` | The latest release with major 1, at least the given version |
 | `1.2.3` | Exactly 1.2.3, never upgraded |
 
-A skill without any release is pinned to the latest commit of the default branch.
+Without a range, `kitt install foo` selects the latest release, including when `foo` is already direct. An existing transitive-only skill is promoted to direct and keeps its pin. A skill without any release is pinned to the latest commit of the default branch.
+
+## Skill dependencies
+
+Declare requirements in `SKILL.md` frontmatter:
+
+```yaml
+metadata:
+  version: "2.0.0"
+  requires: "code-review@^1.0.0 public/security@^1 adr@1.2.3"
+```
+
+Use a space-separated string: kitt < 0.2.0 reads metadata values as strings and fails on a YAML list, so a list in a published skill breaks consumers still on 0.1.x. kitt >= 0.2.0 also accepts a list.
+
+kitt reads `metadata.requires` as skill dependencies whenever a string or list entry contains `@`. If a skill uses `metadata.requires` for something else (such as `node@18`), it must not use `@` there or kitt treats it as a skill dependency; values without `@` (such as `python3`) are ignored.
+
+Use `name@constraint` for the same source or `alias/name@constraint` for another source configured in `[sources]`. A constraint is mandatory: only exact `X.Y.Z` and caret `^X[.Y[.Z]]` are accepted. Caret means the same major at or above the floor, including major zero: `^0.2` accepts later `0.x` releases. Dependencies must have published releases; a branch-tip pin cannot satisfy a requirement.
+
+- `install <skill>` resolves its dependencies and reuses compatible pins; `install` restores the pinned set. Installing an existing transitive skill without a range marks it direct and keeps its pin.
+- `upgrade` also moves transitive dependencies to the newest release allowed by their dependents' ranges. `--major` never overrides a dependent's range and prints a note when it blocks a newer major. It checks the resulting dependency graph, including every dependent's range. There is one version per skill name per scope (project or user); conflicting ranges or sources fail with all requesters listed and apply nothing.
+- `list` shows a dependency tree, shared skills and direct installs when dependency edges or transitive-only entries exist; otherwise it keeps the flat table. `doctor` checks dependency consistency offline and reports orphaned transitive skills. Orphans are kept; there is no remove command.
+- `release <skill>` validates every immediate requirement before creating a tag: syntax, known alias, a matching published release and the skill's presence at that release. Bare requirements use the selected release remote (`--remote`, default `origin`); qualified requirements use the skills repository root's `kitt.toml`, never the user manifest. Local-only tags do not count.
+
+In `kitt.toml`, `direct` defaults to `true`; transitive-only entries have `direct = false` and no generated `version` constraint. `via` lists sorted, unique immediate parent names, including for direct installs that are also dependencies. `resolved.requires` snapshots the pinned requirements with explicit aliases; `[]` means a known leaf, while an absent key means legacy/unknown metadata. Kitt keeps these dependency keys while edges or transitive-only entries remain, including retained orphans:
+
+```toml
+[skills.code-review]
+source = "team"
+direct = false
+via = ["review"]
+[skills.code-review.resolved]
+version = "1.4.0"
+commit = "9f1c2e7a…"
+hash = "h1:Lr…"
+requires = []
+```
+
+**Projects and skills using dependencies need kitt >= 0.2.0.** Projects without dependencies keep the existing manifest format. Older kitt rejects `direct`, `via` and `resolved.requires` as unknown keys and does not resolve `metadata.requires`; update teammates, CI and hook installations before sharing dependencies.
 
 ## `kitt.toml`
 
@@ -93,7 +130,7 @@ commit = "9f1c2e7a…"
 hash = "h1:Lr…"
 ```
 
-You can edit `[sources]` and the `source` / `version` of a skill by hand; `kitt install` resolves and pins entries that have no `resolved` block. User-level skills use the same format in `~/Library/Application Support/kitt/kitt.toml` (macOS), `~/.config/kitt/kitt.toml` (Linux) or `%AppData%\kitt\kitt.toml` (Windows), and install into `~/.agents/skills/`.
+You can edit `[sources]` and the `source` / `version` of a skill by hand; `kitt install` resolves and pins entries that have no `resolved` block. A `version` edit that excludes the current pin makes install and upgrade fail with a stale-pin error. Restore a range that includes the pin, or delete that skill's `resolved` block and run `kitt install` to resolve it again. After changing a skill's source, clear its `resolved` block too. User-level skills use the same format in `~/Library/Application Support/kitt/kitt.toml` (macOS), `~/.config/kitt/kitt.toml` (Linux) or `%AppData%\kitt\kitt.toml` (Windows), and install into `~/.agents/skills/`.
 
 ## Project memory
 

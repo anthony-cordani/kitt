@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -22,15 +23,30 @@ type Manifest struct {
 // Skill is one skill entry of the manifest.
 type Skill struct {
 	Source   string    `toml:"source"`
-	Version  string    `toml:"version,omitempty"`  // constraint as requested
+	Version  string    `toml:"version,omitempty"` // constraint as requested
+	Direct   *bool     `toml:"direct,omitempty"`  // nil means direct for legacy manifests
+	Via      []string  `toml:"via,omitempty"`
 	Resolved *Resolved `toml:"resolved,omitempty"` // written by kitt only
+}
+
+// IsDirect reports direct-install intent; an absent direct field defaults to true.
+func (s *Skill) IsDirect() bool {
+	return s.Direct == nil || *s.Direct
+}
+
+// SetVia records sorted, unique immediate parent names without changing parents.
+func (s *Skill) SetVia(parents []string) {
+	s.Via = slices.Clone(parents)
+	slices.Sort(s.Via)
+	s.Via = slices.Compact(s.Via)
 }
 
 // Resolved is the pinned state of a skill.
 type Resolved struct {
-	Version string `toml:"version"`
-	Commit  string `toml:"commit"`
-	Hash    string `toml:"hash"`
+	Version  string    `toml:"version"`
+	Commit   string    `toml:"commit"`
+	Hash     string    `toml:"hash"`
+	Requires *[]string `toml:"requires,omitempty"` // nil is unknown; an empty slice is a known leaf
 }
 
 // Load reads a manifest; the maps are never nil.

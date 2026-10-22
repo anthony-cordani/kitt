@@ -24,3 +24,11 @@ func TestJunctionRejectsShellCharacters(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestJunctionCommandQuotesEqualsSpacesAndNativePaths(t *testing.T) {
+	link, target := `C:\project with spaces\global=false\.claude\skills\leaf`, `C:\project with spaces\global=false\.agents\skills\leaf`
+	want := `cmd /c mklink /J "C:\project with spaces\global=false\.claude\skills\leaf" "C:\project with spaces\global=false\.agents\skills\leaf"`
+	if got := junctionCommandLine(link, target); got != want {
+		t.Fatalf("command = %q, want %q", got, want)
+	}
+}

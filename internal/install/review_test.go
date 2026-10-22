@@ -269,7 +269,7 @@ func TestUpgradeUnresolvedCaretHonorsFloor(t *testing.T) {
 	assertSameTree(t, before, snapshot(t, project))
 }
 
-func TestUpgradeSavesSuccessBeforeLaterFailure(t *testing.T) {
+func TestUpgradeValidatesAllTargetsBeforeApplying(t *testing.T) {
 	project, repo := newPair(t)
 	testutil.Release(t, repo, "a", "1.0.0")
 	testutil.WriteSkill(t, repo, "b", "", "b")
@@ -277,19 +277,21 @@ func TestUpgradeSavesSuccessBeforeLaterFailure(t *testing.T) {
 	writeKitt(t, project, map[string]string{"demo": testutil.URL(repo)})
 	mustAdd(t, project, "a")
 	mustAdd(t, project, "b")
-	next := testutil.Release(t, repo, "a", "1.1.0")
+	testutil.Release(t, repo, "a", "1.1.0")
 	if err := os.RemoveAll(filepath.Join(repo, "skills", "b")); err != nil {
 		t.Fatal(err)
 	}
 	testutil.Commit(t, repo, "remove b")
+	before := snapshot(t, project)
 	opts, _ := withOpts(project, false)
 	if err := install.Upgrade(opts, "", false); err == nil || !strings.Contains(err.Error(), "skill b not found") {
 		t.Fatalf("error = %v", err)
 	}
 	sk := skillEntry(t, project, "a")
-	if sk.Resolved.Commit != next {
-		t.Fatalf("manifest still pins %s, want %s", sk.Resolved.Commit, next)
+	if sk.Resolved.Version != "1.0.0" {
+		t.Fatalf("manifest changed before all targets validated: %+v", sk.Resolved)
 	}
+	assertSameTree(t, before, snapshot(t, project))
 	if n, out := mustDoctor(t, project); n != 0 {
 		t.Fatalf("doctor: %s", out)
 	}
