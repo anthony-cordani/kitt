@@ -58,14 +58,17 @@ kitt never overwrites a file it did not create. On a project that already has an
 |---|---|
 | `kitt init [--source alias=url]…` | Writes the missing project files, installs the git hooks, installs the skills. Without `--source`, asks for the skills repositories and checks that git can reach them. |
 | `kitt install` | Restores every skill exactly as pinned in `kitt.toml`. Fast and offline when nothing changed. |
-| `kitt install [source/]skill[@constraint]` | Adds a skill and pins it. The source can be omitted when `kitt.toml` has only one. |
+| `kitt install [source/]skill[@constraint]` | Adds a skill and pins it. The source can be omitted when only one source has a skill of that name. |
+| `kitt remote [-g]` | Lists configured skill sources, sorted by alias. |
+| `kitt remote add <name> <url>` | Adds a skill source (`-g` goes before `add` for user-level sources). |
+| `kitt remote rm <name>` | Removes an unused skill source (`-g` goes before `rm` for user-level sources). |
 | `kitt upgrade [skill] [--major]` | Moves skills to their newest release in the same major version, showing the diff of each skill. `--major` allows a new major version. Also moves transitive dependencies within their dependents' ranges. Exact pins (`1.2.0`) are kept. |
 | `kitt list` | Installed skills, and the skills available in each source with their latest release. |
 | `kitt doctor` | Reports drift: skill modified locally, missing link, outdated `.gitignore` block or docs index, stale project docs. Also checks dependency pins, sources, cycles, snapshots, `via` and orphans. Exit code 2 when something is wrong. Changes nothing. |
 | `kitt release <skill>` | In a skills repository: tags and pushes a new version of a skill (see below). |
 | `kitt --version` | Prints the installed version. |
 
-`install`, `upgrade`, `list` and `doctor` take `-g` to work on user-level skills instead of the current project. The first time, give the skills repository: `kitt install -g --source alias=url <skill>` creates the user `kitt.toml` (repeatable `--source`). In a project that already has a `kitt.toml`, `kitt install --source alias=url` adds the source to it.
+`install`, `upgrade`, `list`, `remote` and `doctor` take `-g` to work on user-level skills instead of the current project. The first time, give the skills repository: `kitt install -g --source alias=url <skill>` creates the user `kitt.toml` (repeatable `--source`). In a project that already has a `kitt.toml`, `kitt install --source alias=url` or `kitt remote add alias url` adds the source to it.
 
 ### Version constraints
 

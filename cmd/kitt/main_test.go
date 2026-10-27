@@ -12,12 +12,12 @@ import (
 	"github.com/anthony-cordani/kitt/internal/testutil"
 )
 
-func TestRunHelpListsSixCommands(t *testing.T) {
+func TestRunHelpListsSevenCommands(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"--help"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("exit %d\nstderr: %s", code, stderr.String())
 	}
-	for _, name := range []string{"init", "install", "upgrade", "list", "doctor", "release"} {
+	for _, name := range []string{"init", "install", "remote", "upgrade", "list", "doctor", "release"} {
 		if !strings.Contains(stdout.String(), "\n  "+name+" ") {
 			t.Errorf("stdout does not list %s\n%s", name, stdout.String())
 		}
@@ -45,7 +45,7 @@ func TestRunUnknownCommandPrintsUsage(t *testing.T) {
 }
 
 func TestRunSubcommandHelpExitsZero(t *testing.T) {
-	for _, name := range []string{"init", "install", "upgrade", "list", "doctor", "release"} {
+	for _, name := range []string{"init", "install", "remote", "upgrade", "list", "doctor", "release"} {
 		t.Run(name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			if code := run([]string{name, "-h"}, &stdout, &stderr); code != 0 {

@@ -19,6 +19,7 @@ type command struct {
 var commands = []command{
 	{"init", "Set up AGENTS.md, RULES.md, .agents/ and kitt.toml in the current project"},
 	{"install", "Install the skills pinned in kitt.toml, or add one (-g: user level)"},
+	{"remote", "List, add or remove skill sources in kitt.toml"},
 	{"upgrade", "Upgrade all skills or one skill, showing what changes"},
 	{"list", "List installed and available skills"},
 	{"doctor", "Check skills, links and project docs for drift"},
@@ -44,6 +45,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 		if c.name == "install" && args[0] == "install" {
 			return installCmd(args[1:], stdout, stderr)
+		}
+		if c.name == "remote" && args[0] == "remote" {
+			return remoteCmd(args[1:], stdout, stderr)
 		}
 		if c.name == "upgrade" && args[0] == "upgrade" {
 			return upgradeCmd(args[1:], stdout, stderr)
