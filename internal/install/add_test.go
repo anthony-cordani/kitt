@@ -1,6 +1,7 @@
 package install_test
 
 import (
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -50,21 +51,91 @@ func TestAddWithoutAliasUsesTheOnlySource(t *testing.T) {
 	assertResolved(t, sk, "^1", "1.4.0")
 }
 
-func TestAddWithSeveralSourcesErrors(t *testing.T) {
+func TestAddBareNameSeveralSources(t *testing.T) {
 	project, skills := standard(t)
 	other := testutil.NewRepo(t)
+	release(t, other, "review", "1.0.0")
 	writeKitt(t, project, map[string]string{
 		"demo":  testutil.URL(skills),
 		"other": testutil.URL(other),
 	})
+	before := snapshot(t, project)
 	opt, _ := withOpts(project, false)
 
 	err := install.Add(opt, "review@^1")
 
-	if err == nil || !strings.Contains(err.Error(), "several sources") {
+	if err == nil || err.Error() != "skill review is in several sources (demo, other): use <source>/review" {
 		t.Fatalf("Add err = %v", err)
 	}
 	assertMissing(t, skillPath(project, "review"))
+	assertSameTree(t, before, snapshot(t, project))
+}
+
+func TestAddBareNameUniqueAcrossSources(t *testing.T) {
+	for _, alias := range []string{"alpha", "zulu"} {
+		t.Run(alias, func(t *testing.T) {
+			project, skills := standard(t)
+			other := testutil.NewRepo(t)
+			release(t, other, "adr", "1.0.0")
+			writeKitt(t, project, map[string]string{
+				"demo": testutil.URL(skills),
+				alias:  testutil.URL(other),
+			})
+			out := mustAdd(t, project, "adr@^1")
+			if out != "added adr 1.0.0\n" {
+				t.Fatalf("output = %q", out)
+			}
+			sk := skillEntry(t, project, "adr")
+			if sk.Source != alias {
+				t.Fatalf("source = %q, want %q", sk.Source, alias)
+			}
+			assertResolved(t, sk, "^1", "1.0.0")
+			body := readText(t, filepath.Join(skillPath(project, "adr"), "SKILL.md"))
+			if !strings.Contains(body, "\nadr 1.0.0\n") {
+				t.Fatalf("installed skill =\n%s", body)
+			}
+		})
+	}
+}
+
+func TestAddBareNameNotFound(t *testing.T) {
+	project, skills := standard(t)
+	other := testutil.NewRepo(t)
+	release(t, other, "adr", "1.0.0")
+	writeKitt(t, project, map[string]string{
+		"demo":  testutil.URL(skills),
+		"other": testutil.URL(other),
+	})
+	before := snapshot(t, project)
+	opt, _ := withOpts(project, false)
+	err := install.Add(opt, "missing")
+	if err == nil || err.Error() != "skill missing not found in any source (demo, other)" {
+		t.Fatalf("Add err = %v", err)
+	}
+	assertSameTree(t, before, snapshot(t, project))
+}
+
+func TestAddBareNameUnreachableSource(t *testing.T) {
+	for _, failure := range []string{"open", "list"} {
+		t.Run(failure, func(t *testing.T) {
+			project, skills := standard(t)
+			other := testutil.NewRepo(t)
+			if failure == "open" {
+				other = filepath.Join(other, "missing")
+			}
+			writeKitt(t, project, map[string]string{
+				"demo":  testutil.URL(skills),
+				"other": testutil.URL(other),
+			})
+			before := snapshot(t, project)
+			opt, _ := withOpts(project, false)
+			err := install.Add(opt, "review")
+			if err == nil || !strings.HasPrefix(err.Error(), "source other unreachable: use <source>/<skill>: ") || errors.Unwrap(err) == nil {
+				t.Fatalf("Add err = %v, want wrapped source error", err)
+			}
+			assertSameTree(t, before, snapshot(t, project))
+		})
+	}
 }
 
 func TestAddUnknownSourceErrors(t *testing.T) {

@@ -368,7 +368,29 @@ func installTarget(m *manifest.Manifest, p paths, text string) (dependency.Targe
 					r.Source = alias
 				}
 			default:
-				return dependency.Target{}, fmt.Errorf("several sources: use <source>/<skill>")
+				aliases := slices.Sorted(maps.Keys(m.Sources))
+				var matches []string
+				for _, alias := range aliases {
+					src, err := openFetch(alias, m.Sources[alias])
+					if err != nil {
+						return dependency.Target{}, fmt.Errorf("source %s unreachable: use <source>/<skill>: %w", alias, err)
+					}
+					names, err := src.Skills()
+					if err != nil {
+						return dependency.Target{}, fmt.Errorf("source %s unreachable: use <source>/<skill>: %w", alias, err)
+					}
+					if slices.Contains(names, r.Name) {
+						matches = append(matches, alias)
+					}
+				}
+				switch len(matches) {
+				case 0:
+					return dependency.Target{}, fmt.Errorf("skill %s not found in any source (%s)", r.Name, strings.Join(aliases, ", "))
+				case 1:
+					r.Source = matches[0]
+				default:
+					return dependency.Target{}, fmt.Errorf("skill %s is in several sources (%s): use <source>/%s", r.Name, strings.Join(matches, ", "), r.Name)
+				}
 			}
 		}
 	}
