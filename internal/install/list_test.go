@@ -368,6 +368,8 @@ func TestListUpdatesUnreachableSource(t *testing.T) {
 	writeKitt(t, project, map[string]string{"demo": testutil.URL(skills)})
 	mustAdd(t, project, "review@^1")
 	release(t, skills, "review", "1.1.0")
+	// Fill the cache with 1.1.0, so only the unreachable source keeps it out of Updates.
+	assertUpdates(t, mustList(t, project), "  review  1.0.0 -> 1.1.0\n")
 	moved := filepath.Join(filepath.Dir(skills), "demo-moved")
 	if err := os.Rename(skills, moved); err != nil {
 		t.Fatal(err)
@@ -457,7 +459,7 @@ func TestListUpdatesMatchUpgrade(t *testing.T) {
 			t.Fatalf("resolved version = %s, want 1.4.0", got)
 		}
 		assertUpdates(t, mustList(t, project), want)
-		mustUpgrade(t, project, "review", true)
+		mustUpgrade(t, project, "", true)
 		if got := skillEntry(t, project, "review").Resolved.Version; got != "2.0.0" {
 			t.Fatalf("upgraded version = %s, want 2.0.0", got)
 		}
