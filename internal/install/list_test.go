@@ -252,3 +252,191 @@ func TestListIncompleteHeadingOnlyForTransitiveEntries(t *testing.T) {
 		}
 	})
 }
+
+func updatesBlock(out string) (string, bool) {
+	_, after, ok := strings.Cut(out, "Updates:\n")
+	if !ok {
+		return "", false
+	}
+	return after, true
+}
+
+func assertUpdates(t *testing.T, out, want string) {
+	t.Helper()
+	got, ok := updatesBlock(out)
+	if !ok || got != want {
+		t.Fatalf("updates = %q, want %q\n%s", got, want, out)
+	}
+}
+
+func assertNoUpdates(t *testing.T, out string) {
+	t.Helper()
+	if _, ok := updatesBlock(out); ok {
+		t.Fatalf("unexpected Updates:\n%s", out)
+	}
+}
+
+func TestListUpdatesMajorOnly(t *testing.T) {
+	project, _ := standard(t)
+	mustAdd(t, project, "demo/review@^1")
+	out := mustList(t, project)
+	assertUpdates(t, out, "  review  1.4.0 -> 2.0.0  (major: kitt upgrade --major)\n")
+}
+
+func TestListUpdatesInRange(t *testing.T) {
+	project, skills := newPair(t)
+	release(t, skills, "review", "1.0.0")
+	writeKitt(t, project, map[string]string{"demo": testutil.URL(skills)})
+	mustAdd(t, project, "review@^1")
+	release(t, skills, "review", "1.1.0")
+	out := mustList(t, project)
+	assertUpdates(t, out, "  review  1.0.0 -> 1.1.0\n")
+}
+
+func TestListUpdatesInRangeAndMajor(t *testing.T) {
+	project, skills := newPair(t)
+	release(t, skills, "review", "1.0.0")
+	writeKitt(t, project, map[string]string{"demo": testutil.URL(skills)})
+	mustAdd(t, project, "review@^1")
+	release(t, skills, "review", "1.1.0")
+	release(t, skills, "review", "2.0.0")
+	out := mustList(t, project)
+	assertUpdates(t, out, "  review  1.0.0 -> 1.1.0  (2.0.0 with kitt upgrade --major)\n")
+}
+
+func TestListUpdatesUpToDate(t *testing.T) {
+	project, _ := standard(t)
+	mustAdd(t, project, "demo/review")
+	if got := skillEntry(t, project, "review").Resolved.Version; got != "2.0.0" {
+		t.Fatalf("resolved version = %s, want 2.0.0", got)
+	}
+	assertNoUpdates(t, mustList(t, project))
+}
+
+func TestListUpdatesExactPin(t *testing.T) {
+	project, _ := standard(t)
+	mustAdd(t, project, "demo/review@1.0.0")
+	sk := skillEntry(t, project, "review")
+	if sk.Version != "1.0.0" || sk.Resolved == nil || sk.Resolved.Version != "1.0.0" {
+		t.Fatalf("pin = %+v", sk)
+	}
+	out := mustList(t, project)
+	if !lineWith(out, "review", "2.0.0", "installed") {
+		t.Fatalf("available latest missing:\n%s", out)
+	}
+	assertNoUpdates(t, out)
+}
+
+func TestListUpdatesSkipsDependencies(t *testing.T) {
+	f := dependencyScope(t, false)
+	dependencyRelease(t, f.repo, "leaf", "1.0.0")
+	dependencyRelease(t, f.repo, "held", "1.0.0")
+	dependencyRelease(t, f.repo, "root", "1.0.0", "leaf@^1", "held@^1")
+	f.add(t, "root")
+	f.add(t, "held")
+	dependencyRelease(t, f.repo, "leaf", "1.1.0")
+	dependencyRelease(t, f.repo, "held", "1.1.0")
+	m := loadManifest(t, f.path)
+	if m.Skills["leaf"].IsDirect() || !m.Skills["held"].IsDirect() {
+		t.Fatalf("leaf direct = %t, held direct = %t", m.Skills["leaf"].IsDirect(), m.Skills["held"].IsDirect())
+	}
+	out := mustList(t, f.root)
+	if !lineWith(out, "leaf", "1.1.0") || !lineWith(out, "held", "1.1.0") {
+		t.Fatalf("newer releases missing from available:\n%s", out)
+	}
+	assertNoUpdates(t, out)
+}
+
+func TestListUpdatesUnreachableSource(t *testing.T) {
+	project, skills := newPair(t)
+	release(t, skills, "review", "1.0.0")
+	writeKitt(t, project, map[string]string{"demo": testutil.URL(skills)})
+	mustAdd(t, project, "review@^1")
+	release(t, skills, "review", "1.1.0")
+	moved := filepath.Join(filepath.Dir(skills), "demo-moved")
+	if err := os.Rename(skills, moved); err != nil {
+		t.Fatal(err)
+	}
+	out := mustList(t, project)
+	if !strings.Contains(out, "Available in demo: unreachable") {
+		t.Fatalf("missing unreachable line:\n%s", out)
+	}
+	assertNoUpdates(t, out)
+}
+
+func TestListUpdatesEmptyConstraint(t *testing.T) {
+	t.Run("in range", func(t *testing.T) {
+		project, skills := newPair(t)
+		release(t, skills, "review", "1.0.0")
+		writeKitt(t, project, map[string]string{"demo": testutil.URL(skills)})
+		mustAdd(t, project, "review@^1")
+		clearVersion(t, project, "review")
+		release(t, skills, "review", "1.1.0")
+		out := mustList(t, project)
+		assertUpdates(t, out, "  review  1.0.0 -> 1.1.0\n")
+	})
+	t.Run("major", func(t *testing.T) {
+		project, skills := newPair(t)
+		release(t, skills, "review", "1.0.0")
+		writeKitt(t, project, map[string]string{"demo": testutil.URL(skills)})
+		mustAdd(t, project, "review@^1")
+		clearVersion(t, project, "review")
+		release(t, skills, "review", "2.0.0")
+		out := mustList(t, project)
+		assertUpdates(t, out, "  review  1.0.0 -> 2.0.0  (major: kitt upgrade --major)\n")
+	})
+}
+
+func clearVersion(t *testing.T, project, name string) {
+	t.Helper()
+	path := filepath.Join(project, manifest.FileName)
+	m := loadManifest(t, path)
+	m.Skills[name].Version = ""
+	if err := m.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadManifest(t, path).Skills[name].Version; got != "" {
+		t.Fatalf("version = %q, want empty", got)
+	}
+}
+
+func TestListUpdatesUnreleasedPin(t *testing.T) {
+	project, skills := newPair(t)
+	testutil.WriteSkill(t, skills, "review", "", "review body")
+	testutil.Commit(t, skills, "review")
+	writeKitt(t, project, map[string]string{"demo": testutil.URL(skills)})
+	mustAdd(t, project, "demo/review")
+	sk := skillEntry(t, project, "review")
+	if sk.Resolved == nil || sk.Resolved.Version != "" {
+		t.Fatalf("resolved = %+v, want an unreleased pin", sk.Resolved)
+	}
+	out := mustList(t, project)
+	if !lineWith(out, "review", "no release") {
+		t.Fatalf("available line missing:\n%s", out)
+	}
+	assertNoUpdates(t, out)
+}
+
+func TestListUpdatesMatchUpgrade(t *testing.T) {
+	t.Run("in range", func(t *testing.T) {
+		project, skills := newPair(t)
+		release(t, skills, "review", "1.0.0")
+		writeKitt(t, project, map[string]string{"demo": testutil.URL(skills)})
+		mustAdd(t, project, "review@^1")
+		release(t, skills, "review", "1.1.0")
+		mustUpgrade(t, project, "", false)
+		if got := skillEntry(t, project, "review").Resolved.Version; got != "1.1.0" {
+			t.Fatalf("upgraded version = %s, want 1.1.0", got)
+		}
+		assertNoUpdates(t, mustList(t, project))
+	})
+	t.Run("major", func(t *testing.T) {
+		project, _ := standard(t)
+		mustAdd(t, project, "demo/review@^1")
+		mustUpgrade(t, project, "review", true)
+		if got := skillEntry(t, project, "review").Resolved.Version; got != "2.0.0" {
+			t.Fatalf("upgraded version = %s, want 2.0.0", got)
+		}
+		assertNoUpdates(t, mustList(t, project))
+	})
+}
