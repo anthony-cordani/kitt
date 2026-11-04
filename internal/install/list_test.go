@@ -327,6 +327,21 @@ func TestListUpdatesExactPin(t *testing.T) {
 	assertNoUpdates(t, out)
 }
 
+func TestListUpdatesInvalidConstraint(t *testing.T) {
+	project, skills := newPair(t)
+	release(t, skills, "review", "1.0.0")
+	writeKitt(t, project, map[string]string{"demo": testutil.URL(skills)})
+	mustAdd(t, project, "review@^1")
+	release(t, skills, "review", "1.1.0")
+	path := filepath.Join(project, manifest.FileName)
+	m := loadManifest(t, path)
+	m.Skills["review"].Version = "1.0"
+	if err := m.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	assertNoUpdates(t, mustList(t, project))
+}
+
 func TestListUpdatesSkipsDependencies(t *testing.T) {
 	f := dependencyScope(t, false)
 	dependencyRelease(t, f.repo, "leaf", "1.0.0")
@@ -410,8 +425,9 @@ func TestListUpdatesUnreleasedPin(t *testing.T) {
 	if sk.Resolved == nil || sk.Resolved.Version != "" {
 		t.Fatalf("resolved = %+v, want an unreleased pin", sk.Resolved)
 	}
+	release(t, skills, "review", "1.0.0")
 	out := mustList(t, project)
-	if !lineWith(out, "review", "no release") {
+	if !lineWith(out, "review", "1.0.0", "installed") {
 		t.Fatalf("available line missing:\n%s", out)
 	}
 	assertNoUpdates(t, out)
@@ -424,6 +440,7 @@ func TestListUpdatesMatchUpgrade(t *testing.T) {
 		writeKitt(t, project, map[string]string{"demo": testutil.URL(skills)})
 		mustAdd(t, project, "review@^1")
 		release(t, skills, "review", "1.1.0")
+		assertUpdates(t, mustList(t, project), "  review  1.0.0 -> 1.1.0\n")
 		mustUpgrade(t, project, "", false)
 		if got := skillEntry(t, project, "review").Resolved.Version; got != "1.1.0" {
 			t.Fatalf("upgraded version = %s, want 1.1.0", got)
@@ -433,6 +450,13 @@ func TestListUpdatesMatchUpgrade(t *testing.T) {
 	t.Run("major", func(t *testing.T) {
 		project, _ := standard(t)
 		mustAdd(t, project, "demo/review@^1")
+		const want = "  review  1.4.0 -> 2.0.0  (major: kitt upgrade --major)\n"
+		assertUpdates(t, mustList(t, project), want)
+		mustUpgrade(t, project, "", false)
+		if got := skillEntry(t, project, "review").Resolved.Version; got != "1.4.0" {
+			t.Fatalf("resolved version = %s, want 1.4.0", got)
+		}
+		assertUpdates(t, mustList(t, project), want)
 		mustUpgrade(t, project, "review", true)
 		if got := skillEntry(t, project, "review").Resolved.Version; got != "2.0.0" {
 			t.Fatalf("upgraded version = %s, want 2.0.0", got)

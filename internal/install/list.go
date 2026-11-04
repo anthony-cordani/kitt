@@ -358,10 +358,12 @@ func writeUpdates(out io.Writer, m *manifest.Manifest, names []string, reachable
 	return nil
 }
 
-// upgradable leaves out what kitt upgrade keeps or may hold back: exact pins,
-// unreleased pins, transitive skills and skills another skill requires.
+// upgradable leaves out what kitt upgrade keeps, refuses or may hold back: exact
+// pins, invalid constraints, unreleased pins, transitive skills and skills another
+// skill requires.
 func upgradable(m *manifest.Manifest, name string, s *manifest.Skill) bool {
 	return s.IsDirect() && s.Resolved != nil && s.Resolved.Version != "" &&
+		source.ValidateConstraint(s.Version) == nil &&
 		!exactPin(s.Version) && !hasIncomingRequirement(m, name)
 }
 
