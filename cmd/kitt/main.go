@@ -6,6 +6,8 @@ import (
 	"io"
 	"os"
 	"runtime/debug"
+
+	"github.com/anthony-cordani/kitt/internal/updatecheck"
 )
 
 // version is set at release time by goreleaser (-X main.version=...).
@@ -28,7 +30,18 @@ var commands = []command{
 }
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	os.Exit(runWithUpdateNotice(os.Args[1:], os.Stdout, os.Stderr, updatecheck.Default(currentVersion(), version == "dev", os.Stderr)))
+}
+
+// runWithUpdateNotice prints the notice after the command. A nil checker prints nothing.
+func runWithUpdateNotice(args []string, stdout, stderr io.Writer, checker *updatecheck.Checker) int {
+	if checker == nil {
+		return run(args, stdout, stderr)
+	}
+	finish := checker.Start()
+	code := run(args, stdout, stderr)
+	finish()
+	return code
 }
 
 func run(args []string, stdout, stderr io.Writer) int {

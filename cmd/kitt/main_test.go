@@ -3,14 +3,19 @@ package main
 import (
 	"bytes"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/anthony-cordani/kitt/internal/install"
 	"github.com/anthony-cordani/kitt/internal/scaffold"
 	"github.com/anthony-cordani/kitt/internal/testutil"
+	"github.com/anthony-cordani/kitt/internal/updatecheck"
 )
 
 func TestRunHelpListsEightCommands(t *testing.T) {
@@ -217,5 +222,77 @@ func TestVersion(t *testing.T) {
 		if got := stdout.String(); !strings.HasPrefix(got, "kitt ") || strings.TrimSpace(got) == "kitt" {
 			t.Fatalf("run(%s) stdout = %q, want \"kitt <version>\"", arg, got)
 		}
+	}
+}
+
+func TestRunWithUpdateNotice(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		args   []string
+		status int
+		code   int
+	}{
+		{"version", []string{"--version"}, http.StatusOK, 0},
+		{"command failure", []string{"nope"}, http.StatusInternalServerError, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				w.WriteHeader(tc.status)
+				io.WriteString(w, `{"tag_name":"v9.9.9"}`)
+			}))
+			defer server.Close()
+			var stdout, stderr bytes.Buffer
+			now := time.Date(2026, time.November, 4, 12, 0, 0, 0, time.UTC)
+			checker := &updatecheck.Checker{
+				Current:   "0.4.0",
+				URL:       server.URL,
+				CachePath: filepath.Join(t.TempDir(), "update-check.json"),
+				Hint:      "brew upgrade --cask anthony-cordani/tap/kitt",
+				Out:       &stderr,
+				Now:       func() time.Time { return now },
+			}
+			if code := runWithUpdateNotice(tc.args, &stdout, &stderr, checker); code != tc.code {
+				t.Errorf("exit %d, want %d", code, tc.code)
+			}
+			if tc.code == 0 {
+				if got, want := stdout.String(), "kitt "+currentVersion()+"\n"; got != want {
+					t.Errorf("stdout = %q, want %q", got, want)
+				}
+				want := "Kitt update available 0.4.0 -> 9.9.9 (run: brew upgrade --cask anthony-cordani/tap/kitt)\n"
+				if got := stderr.String(); got != want {
+					t.Errorf("stderr = %q, want %q", got, want)
+				}
+			} else {
+				if stdout.Len() != 0 {
+					t.Errorf("stdout = %q, want empty", stdout.String())
+				}
+				var want bytes.Buffer
+				run(tc.args, io.Discard, &want)
+				if got := stderr.String(); got != want.String() {
+					t.Errorf("stderr = %q, want %q", got, want.String())
+				}
+				if strings.Contains(stderr.String(), "Kitt update available") {
+					t.Errorf("unexpected update notice: %q", stderr.String())
+				}
+			}
+			if got := requests.Load(); got != 1 {
+				t.Errorf("requests = %d, want 1", got)
+			}
+		})
+	}
+}
+
+func TestRunWithUpdateNoticeNil(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := runWithUpdateNotice([]string{"--version"}, &stdout, &stderr, nil); code != 0 {
+		t.Errorf("exit %d, want 0", code)
+	}
+	if got, want := stdout.String(), "kitt "+currentVersion()+"\n"; got != want {
+		t.Errorf("stdout = %q, want %q", got, want)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want empty", stderr.String())
 	}
 }
