@@ -13,6 +13,8 @@ import (
 	"github.com/anthony-cordani/kitt/internal/dependency"
 	"github.com/anthony-cordani/kitt/internal/manifest"
 	"github.com/anthony-cordani/kitt/internal/skill"
+	"github.com/anthony-cordani/kitt/internal/source"
+	"golang.org/x/mod/semver"
 )
 
 // List prints the installed skills and the skills available in each source.
@@ -43,12 +45,17 @@ func List(opts Options) error {
 		aliases = append(aliases, alias)
 	}
 	sort.Strings(aliases)
+	reachable := make(map[string]*source.Source, len(aliases))
 	for _, alias := range aliases {
-		if err := writeAvailable(out, m, alias); err != nil {
+		src, err := writeAvailable(out, m, alias)
+		if err != nil {
 			return err
 		}
+		if src != nil {
+			reachable[alias] = src
+		}
 	}
-	return nil
+	return writeUpdates(out, m, names, reachable)
 }
 
 func dependencyAware(m *manifest.Manifest) bool {
@@ -279,30 +286,31 @@ func skillMissing(skillsDir, name string) (bool, error) {
 	return false, fmt.Errorf("stat skill: %w", err)
 }
 
-func writeAvailable(out io.Writer, m *manifest.Manifest, alias string) error {
+// writeAvailable returns the fetched source, or nil when it is unreachable.
+func writeAvailable(out io.Writer, m *manifest.Manifest, alias string) (*source.Source, error) {
 	url, ok := m.Sources[alias]
 	if !ok {
-		return fmt.Errorf("unknown source %s", alias)
+		return nil, fmt.Errorf("unknown source %s", alias)
 	}
 	src, err := openFetch(alias, url)
 	if err != nil {
 		fmt.Fprintf(out, "Available in %s: unreachable (%v)\n", alias, err)
-		return nil
+		return nil, nil
 	}
 	fmt.Fprintf(out, "Available in %s:\n", alias)
 	names, err := src.Skills()
 	if err != nil {
-		return fmt.Errorf("list source %s: %w", alias, err)
+		return nil, fmt.Errorf("list source %s: %w", alias, err)
 	}
 	if len(names) == 0 {
 		fmt.Fprintln(out, "  (none)")
-		return nil
+		return src, nil
 	}
 	tw := tabwriter.NewWriter(out, 0, 8, 2, ' ', 0)
 	for _, name := range names {
 		versions, err := src.Versions(name)
 		if err != nil {
-			return fmt.Errorf("list source %s: %w", alias, err)
+			return nil, fmt.Errorf("list source %s: %w", alias, err)
 		}
 		latest := "no release"
 		if len(versions) > 0 {
@@ -315,7 +323,76 @@ func writeAvailable(out io.Writer, m *manifest.Manifest, alias string) error {
 		fmt.Fprintf(tw, "  %s\t%s\t%s\n", name, latest, mark)
 	}
 	if err := tw.Flush(); err != nil {
+		return nil, fmt.Errorf("write list: %w", err)
+	}
+	return src, nil
+}
+
+// writeUpdates prints what kitt upgrade would move, using the sources already fetched.
+func writeUpdates(out io.Writer, m *manifest.Manifest, names []string, reachable map[string]*source.Source) error {
+	var lines []string
+	for _, name := range names {
+		s := m.Skills[name]
+		if s == nil || reachable[s.Source] == nil || !upgradable(m, name, s) {
+			continue
+		}
+		versions, err := reachable[s.Source].Versions(name)
+		if err != nil {
+			return fmt.Errorf("list source %s: %w", s.Source, err)
+		}
+		if line := updateLine(name, s, versions); line != "" {
+			lines = append(lines, line)
+		}
+	}
+	if len(lines) == 0 {
+		return nil
+	}
+	fmt.Fprintln(out, "Updates:")
+	tw := tabwriter.NewWriter(out, 0, 8, 2, ' ', 0)
+	for _, line := range lines {
+		fmt.Fprintln(tw, line)
+	}
+	if err := tw.Flush(); err != nil {
 		return fmt.Errorf("write list: %w", err)
 	}
 	return nil
+}
+
+// upgradable leaves out what kitt upgrade keeps, refuses or may hold back: exact
+// pins, invalid constraints, unreleased pins, transitive skills and skills another
+// skill requires.
+func upgradable(m *manifest.Manifest, name string, s *manifest.Skill) bool {
+	return s.IsDirect() && s.Resolved != nil && s.Resolved.Version != "" &&
+		source.ValidateConstraint(s.Version) == nil &&
+		!exactPin(s.Version) && !hasIncomingRequirement(m, name)
+}
+
+// updateLine returns the tab-separated line of a skill, "" when it is up to date.
+// versions is ascending.
+func updateLine(name string, s *manifest.Skill, versions []string) string {
+	current := s.Resolved.Version
+	constraint := s.Version
+	if constraint == "" {
+		constraint = "^" + current
+	}
+	var inRange, newest string
+	for _, v := range versions {
+		if semver.Compare("v"+v, "v"+current) <= 0 {
+			continue
+		}
+		newest = v
+		if ok, err := source.Satisfies(constraint, v); err == nil && ok {
+			inRange = v
+		}
+	}
+	switch {
+	case newest == "":
+		return ""
+	case inRange == "":
+		return fmt.Sprintf("  %s\t%s -> %s\t(major: kitt upgrade --major)", name, current, newest)
+	case inRange == newest:
+		return fmt.Sprintf("  %s\t%s -> %s", name, current, inRange)
+	default:
+		return fmt.Sprintf("  %s\t%s -> %s\t(%s with kitt upgrade --major)", name, current, inRange, newest)
+	}
 }
