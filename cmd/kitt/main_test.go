@@ -249,7 +249,7 @@ func TestRunWithUpdateNotice(t *testing.T) {
 				Current:   "0.4.0",
 				URL:       server.URL,
 				CachePath: filepath.Join(t.TempDir(), "update-check.json"),
-				Hint:      "brew upgrade --cask anthony-cordani/tap/kitt",
+				Hint:      "run: brew upgrade --cask anthony-cordani/tap/kitt",
 				Out:       &stderr,
 				Now:       func() time.Time { return now },
 			}

@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-const testHint = "brew upgrade --cask anthony-cordani/tap/kitt"
+const testHint = "run: brew upgrade --cask anthony-cordani/tap/kitt"
 
 var testNow = time.Date(2026, time.November, 4, 12, 0, 0, 0, time.UTC)
 
@@ -78,7 +78,7 @@ func assertOutput(t *testing.T, f *fixture, latest string) {
 	t.Helper()
 	want := ""
 	if latest != "" {
-		want = fmt.Sprintf("Kitt update available 0.4.0 -> %s (run: %s)\n", latest, testHint)
+		want = fmt.Sprintf("Kitt update available 0.4.0 -> %s (%s)\n", latest, testHint)
 	}
 	if got := f.out.String(); got != want {
 		t.Errorf("output = %q, want %q", got, want)
@@ -177,8 +177,10 @@ func TestFailedRefresh(t *testing.T) {
 				}
 				t.Run(name, func(t *testing.T) {
 					f := newFixture(t, tc.handler)
+					checkedAt := time.Time{}
 					if latest != "" {
-						seedCache(t, f, testNow.Add(-25*time.Hour), latest)
+						checkedAt = testNow.Add(-25 * time.Hour)
+						seedCache(t, f, checkedAt, latest)
 					}
 					wantNotice := ""
 					if latest == "0.5.0" {
@@ -187,14 +189,14 @@ func TestFailedRefresh(t *testing.T) {
 					f.checker.Start()()
 					assertOutput(t, f, wantNotice)
 					assertRequests(t, f, 1)
-					assertCache(t, f, testNow, latest)
+					assertCache(t, f, checkedAt, latest)
 
 					f.out.Reset()
-					f.checker.Now = func() time.Time { return testNow.Add(23 * time.Hour) }
+					f.checker.Now = func() time.Time { return testNow.Add(30 * time.Minute) }
 					f.checker.Start()()
 					assertOutput(t, f, wantNotice)
 					assertRequests(t, f, 1)
-					assertCache(t, f, testNow, latest)
+					assertCache(t, f, checkedAt, latest)
 				})
 			}
 		})
@@ -207,7 +209,8 @@ func TestSlowServer(t *testing.T) {
 		<-release
 		releaseHandler("v0.6.0")(w, r)
 	})
-	seedCache(t, f, testNow.Add(-25*time.Hour), "0.5.0")
+	checkedAt := testNow.Add(-25 * time.Hour)
+	seedCache(t, f, checkedAt, "0.5.0")
 	finish := f.checker.Start()
 	// Registered after server cleanup so the blocked handlers are released first.
 	t.Cleanup(func() {
@@ -221,12 +224,142 @@ func TestSlowServer(t *testing.T) {
 	}
 	assertOutput(t, f, "0.5.0")
 	assertRequests(t, f, 1)
-	assertCache(t, f, testNow, "0.5.0")
+	assertCache(t, f, checkedAt, "0.5.0")
 
 	f.out.Reset()
 	f.checker.Start()()
 	assertOutput(t, f, "0.5.0")
 	assertRequests(t, f, 1)
+}
+
+func TestInterruptedCheck(t *testing.T) {
+	release := make(chan struct{})
+	f := newFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		<-release
+		releaseHandler("v9.9.9")(w, r)
+	})
+	finish := f.checker.Start()
+	// Registered after server cleanup so the blocked handlers are released first.
+	t.Cleanup(func() {
+		close(release)
+		finish()
+	})
+	started := time.Now()
+	finish()
+	if elapsed := time.Since(started); elapsed >= 2*time.Second {
+		t.Errorf("finish took %s, want less than 2s", elapsed)
+	}
+	assertOutput(t, f, "")
+	assertRequests(t, f, 1)
+	got := f.checker.read()
+	if !got.CheckedAt.IsZero() || !got.AttemptedAt.Equal(testNow) || got.Latest != "" {
+		t.Errorf("cache after an interrupted check = %+v, want an attempt at %s and no answer", got, testNow)
+	}
+
+	second := newFixture(t, releaseHandler("v0.5.0"))
+	second.checker.CachePath = f.checker.CachePath
+	second.checker.Now = func() time.Time { return testNow.Add(30 * time.Minute) }
+	second.checker.Start()()
+	assertOutput(t, second, "")
+	assertRequests(t, second, 0)
+
+	second.out.Reset()
+	second.checker.Now = func() time.Time { return testNow.Add(61 * time.Minute) }
+	second.checker.Start()()
+	assertOutput(t, second, "0.5.0")
+	assertRequests(t, second, 1)
+}
+
+func TestFailedRefreshRetriesAfterAnHour(t *testing.T) {
+	f := newFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	checkedAt := testNow.Add(-25 * time.Hour)
+	seedCache(t, f, checkedAt, "0.5.0")
+
+	f.checker.Start()()
+	assertOutput(t, f, "0.5.0")
+	assertRequests(t, f, 1)
+	assertCache(t, f, checkedAt, "0.5.0")
+
+	f.out.Reset()
+	f.checker.Now = func() time.Time { return testNow.Add(30 * time.Minute) }
+	f.checker.Start()()
+	assertOutput(t, f, "0.5.0")
+	assertRequests(t, f, 1)
+	assertCache(t, f, checkedAt, "0.5.0")
+
+	f.out.Reset()
+	f.checker.Now = func() time.Time { return testNow.Add(61 * time.Minute) }
+	f.checker.Start()()
+	assertOutput(t, f, "0.5.0")
+	assertRequests(t, f, 2)
+}
+
+func TestSuccessfulCheckInterval(t *testing.T) {
+	f := newFixture(t, releaseHandler("v0.5.0"))
+	f.checker.Start()()
+	assertOutput(t, f, "0.5.0")
+	assertRequests(t, f, 1)
+	assertCache(t, f, testNow, "0.5.0")
+
+	f.out.Reset()
+	f.checker.Now = func() time.Time { return testNow.Add(23 * time.Hour) }
+	f.checker.Start()()
+	assertOutput(t, f, "0.5.0")
+	assertRequests(t, f, 1)
+	assertCache(t, f, testNow, "0.5.0")
+
+	f.out.Reset()
+	f.checker.Now = func() time.Time { return testNow.Add(25 * time.Hour) }
+	f.checker.Start()()
+	assertOutput(t, f, "0.5.0")
+	assertRequests(t, f, 2)
+	assertCache(t, f, testNow.Add(25*time.Hour), "0.5.0")
+}
+
+func TestFutureAttemptedAt(t *testing.T) {
+	f := newFixture(t, releaseHandler("v0.5.0"))
+	data, err := json.Marshal(cached{
+		CheckedAt:   testNow.Add(-25 * time.Hour),
+		AttemptedAt: testNow.Add(time.Hour),
+		Latest:      "0.4.0",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f.checker.CachePath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.checker.Start()()
+	assertOutput(t, f, "0.5.0")
+	assertRequests(t, f, 1)
+}
+
+func TestPreviousCacheFormat(t *testing.T) {
+	f := newFixture(t, releaseHandler("v0.6.0"))
+	checkedAt := testNow.Add(-time.Hour)
+	data, err := json.Marshal(struct {
+		CheckedAt time.Time `json:"checked_at"`
+		Latest    string    `json:"latest"`
+	}{CheckedAt: checkedAt, Latest: "0.5.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(data, []byte("attempted_at")) {
+		t.Fatalf("previous format contains attempted_at: %s", data)
+	}
+	if err := os.WriteFile(f.checker.CachePath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := f.checker.read()
+	if !got.CheckedAt.Equal(checkedAt) || got.Latest != "0.5.0" || !got.AttemptedAt.IsZero() {
+		t.Errorf("read = %+v, want latest 0.5.0 checked at %s with no attempt", got, checkedAt)
+	}
+	f.checker.Start()()
+	assertOutput(t, f, "0.5.0")
+	assertRequests(t, f, 0)
+	assertCache(t, f, checkedAt, "0.5.0")
 }
 
 func TestUnwritableCache(t *testing.T) {
@@ -250,14 +383,14 @@ func TestHintFor(t *testing.T) {
 	}{
 		{"brew cask", filepath.FromSlash("/opt/homebrew/Caskroom/kitt/0.4.0/kitt"), false, testHint},
 		{"brew cellar", filepath.FromSlash("/usr/local/Cellar/kitt/0.4.0/bin/kitt"), false, testHint},
-		{"scoop", filepath.FromSlash("/Users/x/scoop/apps/kitt/current/kitt.exe"), false, "scoop update kitt"},
-		{"winget", filepath.FromSlash("/Users/x/AppData/Local/Microsoft/WinGet/Packages/kitt/kitt.exe"), false, "winget upgrade AnthonyCordani.kitt"},
+		{"scoop", filepath.FromSlash("/Users/x/scoop/apps/kitt/current/kitt.exe"), false, "run: scoop update kitt"},
+		{"winget", filepath.FromSlash("/Users/x/AppData/Local/Microsoft/WinGet/Packages/kitt/kitt.exe"), false, "run: winget upgrade AnthonyCordani.kitt"},
 		// FromSlash uses backslashes on Windows and native separators on other OSes.
-		{"windows scoop", filepath.FromSlash("C:/Users/x/scoop/apps/kitt/current/kitt.exe"), false, "scoop update kitt"},
-		{"windows winget", filepath.FromSlash("C:/Users/x/AppData/Local/Microsoft/WinGet/Packages/kitt/kitt.exe"), false, "winget upgrade AnthonyCordani.kitt"},
-		{"go install", filepath.Join("home", "x", "go", "bin", "kitt"), true, "go install github.com/anthony-cordani/kitt/cmd/kitt@latest"},
-		{"go install priority", filepath.FromSlash("/opt/homebrew/Cellar/kitt/bin/kitt"), true, "go install github.com/anthony-cordani/kitt/cmd/kitt@latest"},
-		{"unknown", filepath.FromSlash("/home/x/.local/bin/kitt"), false, releasesPage},
+		{"windows scoop", filepath.FromSlash("C:/Users/x/scoop/apps/kitt/current/kitt.exe"), false, "run: scoop update kitt"},
+		{"windows winget", filepath.FromSlash("C:/Users/x/AppData/Local/Microsoft/WinGet/Packages/kitt/kitt.exe"), false, "run: winget upgrade AnthonyCordani.kitt"},
+		{"go install", filepath.Join("home", "x", "go", "bin", "kitt"), true, "run: go install github.com/anthony-cordani/kitt/cmd/kitt@latest"},
+		{"go install priority", filepath.FromSlash("/opt/homebrew/Cellar/kitt/bin/kitt"), true, "run: go install github.com/anthony-cordani/kitt/cmd/kitt@latest"},
+		{"unknown", filepath.FromSlash("/home/x/.local/bin/kitt"), false, "see " + releasesPage},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

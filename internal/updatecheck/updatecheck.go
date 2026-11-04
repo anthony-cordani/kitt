@@ -19,6 +19,7 @@ const (
 	releaseURL   = "https://api.github.com/repos/anthony-cordani/kitt/releases/latest"
 	releasesPage = "https://github.com/anthony-cordani/kitt/releases/latest"
 	interval     = 24 * time.Hour
+	retryAfter   = time.Hour
 	fetchTimeout = 3 * time.Second
 	finishWait   = 300 * time.Millisecond
 	maxBody      = 1 << 20
@@ -29,14 +30,15 @@ type Checker struct {
 	Current   string // running version, without a leading "v"
 	URL       string // GitHub "latest release" endpoint
 	CachePath string
-	Hint      string // what to run to update
+	Hint      string // how to update, as shown in the notice
 	Out       io.Writer
 	Now       func() time.Time
 }
 
 type cached struct {
-	CheckedAt time.Time `json:"checked_at"`
-	Latest    string    `json:"latest"`
+	CheckedAt   time.Time `json:"checked_at"`             // last answer from GitHub
+	AttemptedAt time.Time `json:"attempted_at,omitempty"` // last request sent, answered or not
+	Latest      string    `json:"latest"`
 }
 
 // Default returns the Checker for this process, or nil when no notice must be shown.
@@ -70,12 +72,12 @@ func Default(version string, goInstalled bool, out *os.File) *Checker {
 func (c *Checker) Start() func() {
 	known := c.read()
 	now := c.Now()
-	age := now.Sub(known.CheckedAt)
-	if age >= 0 && age < interval {
+	if within(now, known.CheckedAt, interval) || within(now, known.AttemptedAt, retryAfter) {
 		return func() { c.notify(known.Latest) }
 	}
-	// Written first: a slow network or a short command must not retry on every call.
-	c.write(cached{CheckedAt: now, Latest: known.Latest})
+	// Written first: a slow network or a short command must not retry on every call,
+	// nor give up for the whole day when it exits before the answer.
+	c.write(cached{CheckedAt: known.CheckedAt, AttemptedAt: now, Latest: known.Latest})
 	done := make(chan string, 1)
 	go func() {
 		latest, err := c.fetch()
@@ -83,7 +85,7 @@ func (c *Checker) Start() func() {
 			done <- known.Latest
 			return
 		}
-		c.write(cached{CheckedAt: now, Latest: latest})
+		c.write(cached{CheckedAt: now, AttemptedAt: now, Latest: latest})
 		done <- latest
 	}()
 	return func() {
@@ -100,7 +102,13 @@ func (c *Checker) notify(latest string) {
 	if !releaseVersion(latest) || semver.Compare("v"+latest, "v"+c.Current) <= 0 {
 		return
 	}
-	fmt.Fprintf(c.Out, "Kitt update available %s -> %s (run: %s)\n", c.Current, latest, c.Hint)
+	fmt.Fprintf(c.Out, "Kitt update available %s -> %s (%s)\n", c.Current, latest, c.Hint)
+}
+
+// within reports whether at is a past moment less than d before now. A zero or future time is not.
+func within(now, at time.Time, d time.Duration) bool {
+	age := now.Sub(at)
+	return !at.IsZero() && age >= 0 && age < d
 }
 
 func (c *Checker) fetch() (string, error) {
@@ -180,14 +188,14 @@ func hintFor(exe string, goInstalled bool) string {
 	path := strings.ToLower(filepath.ToSlash(exe))
 	switch {
 	case goInstalled:
-		return "go install github.com/anthony-cordani/kitt/cmd/kitt@latest"
+		return "run: go install github.com/anthony-cordani/kitt/cmd/kitt@latest"
 	case strings.Contains(path, "/caskroom/") || strings.Contains(path, "/cellar/"):
-		return "brew upgrade --cask anthony-cordani/tap/kitt"
+		return "run: brew upgrade --cask anthony-cordani/tap/kitt"
 	case strings.Contains(path, "/scoop/"):
-		return "scoop update kitt"
+		return "run: scoop update kitt"
 	case strings.Contains(path, "/winget/"):
-		return "winget upgrade AnthonyCordani.kitt"
+		return "run: winget upgrade AnthonyCordani.kitt"
 	default:
-		return releasesPage
+		return "see " + releasesPage
 	}
 }
