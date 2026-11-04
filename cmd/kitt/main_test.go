@@ -226,14 +226,17 @@ func TestVersion(t *testing.T) {
 }
 
 func TestRunWithUpdateNotice(t *testing.T) {
+	const notice = "Kitt update available 0.4.0 -> 9.9.9 (run: brew upgrade anthony-cordani/tap/kitt)\n"
 	for _, tc := range []struct {
 		name   string
 		args   []string
 		status int
 		code   int
+		notice bool
 	}{
-		{"version", []string{"--version"}, http.StatusOK, 0},
-		{"command failure", []string{"nope"}, http.StatusInternalServerError, 1},
+		{"version", []string{"--version"}, http.StatusOK, 0, true},
+		{"command failure", []string{"nope"}, http.StatusOK, 1, true},
+		{"server error", []string{"nope"}, http.StatusInternalServerError, 1, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var requests atomic.Int32
@@ -249,9 +252,10 @@ func TestRunWithUpdateNotice(t *testing.T) {
 				Current:   "0.4.0",
 				URL:       server.URL,
 				CachePath: filepath.Join(t.TempDir(), "update-check.json"),
-				Hint:      "run: brew upgrade --cask anthony-cordani/tap/kitt",
+				Hint:      "run: brew upgrade anthony-cordani/tap/kitt",
 				Out:       &stderr,
 				Now:       func() time.Time { return now },
+				Wait:      10 * time.Second,
 			}
 			if code := runWithUpdateNotice(tc.args, &stdout, &stderr, checker); code != tc.code {
 				t.Errorf("exit %d, want %d", code, tc.code)
@@ -260,9 +264,8 @@ func TestRunWithUpdateNotice(t *testing.T) {
 				if got, want := stdout.String(), "kitt "+currentVersion()+"\n"; got != want {
 					t.Errorf("stdout = %q, want %q", got, want)
 				}
-				want := "Kitt update available 0.4.0 -> 9.9.9 (run: brew upgrade --cask anthony-cordani/tap/kitt)\n"
-				if got := stderr.String(); got != want {
-					t.Errorf("stderr = %q, want %q", got, want)
+				if got := stderr.String(); got != notice {
+					t.Errorf("stderr = %q, want %q", got, notice)
 				}
 			} else {
 				if stdout.Len() != 0 {
@@ -270,11 +273,11 @@ func TestRunWithUpdateNotice(t *testing.T) {
 				}
 				var want bytes.Buffer
 				run(tc.args, io.Discard, &want)
+				if tc.notice {
+					want.WriteString(notice)
+				}
 				if got := stderr.String(); got != want.String() {
 					t.Errorf("stderr = %q, want %q", got, want.String())
-				}
-				if strings.Contains(stderr.String(), "Kitt update available") {
-					t.Errorf("unexpected update notice: %q", stderr.String())
 				}
 			}
 			if got := requests.Load(); got != 1 {

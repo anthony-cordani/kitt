@@ -33,6 +33,7 @@ type Checker struct {
 	Hint      string // how to update, as shown in the notice
 	Out       io.Writer
 	Now       func() time.Time
+	Wait      time.Duration // longest a command waits for a refresh
 }
 
 type cached struct {
@@ -64,11 +65,12 @@ func Default(version string, goInstalled bool, out *os.File) *Checker {
 		Hint:      hintFor(exe, goInstalled),
 		Out:       out,
 		Now:       time.Now,
+		Wait:      finishWait,
 	}
 }
 
 // Start refreshes a stale cache in the background. The returned function prints the
-// notice, waiting at most finishWait for that refresh.
+// notice, waiting at most c.Wait for that refresh.
 func (c *Checker) Start() func() {
 	known := c.read()
 	now := c.Now()
@@ -92,7 +94,7 @@ func (c *Checker) Start() func() {
 		select {
 		case latest := <-done:
 			c.notify(latest)
-		case <-time.After(finishWait):
+		case <-time.After(c.Wait):
 			c.notify(known.Latest)
 		}
 	}
@@ -190,7 +192,7 @@ func hintFor(exe string, goInstalled bool) string {
 	case goInstalled:
 		return "run: go install github.com/anthony-cordani/kitt/cmd/kitt@latest"
 	case strings.Contains(path, "/caskroom/") || strings.Contains(path, "/cellar/"):
-		return "run: brew upgrade --cask anthony-cordani/tap/kitt"
+		return "run: brew upgrade anthony-cordani/tap/kitt"
 	case strings.Contains(path, "/scoop/"):
 		return "run: scoop update kitt"
 	case strings.Contains(path, "/winget/"):

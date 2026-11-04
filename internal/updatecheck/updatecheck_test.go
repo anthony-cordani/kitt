@@ -13,12 +13,13 @@ import (
 	"time"
 )
 
-const testHint = "run: brew upgrade --cask anthony-cordani/tap/kitt"
+const testHint = "run: brew upgrade anthony-cordani/tap/kitt"
 
 var testNow = time.Date(2026, time.November, 4, 12, 0, 0, 0, time.UTC)
 
 type fixture struct {
 	checker  *Checker
+	server   *httptest.Server
 	out      bytes.Buffer
 	requests atomic.Int32
 }
@@ -26,18 +27,19 @@ type fixture struct {
 func newFixture(t *testing.T, handler http.HandlerFunc) *fixture {
 	t.Helper()
 	f := &fixture{}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	f.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.requests.Add(1)
 		handler(w, r)
 	}))
-	t.Cleanup(server.Close)
+	t.Cleanup(f.server.Close)
 	f.checker = &Checker{
 		Current:   "0.4.0",
-		URL:       server.URL,
+		URL:       f.server.URL,
 		CachePath: filepath.Join(t.TempDir(), "update-check.json"),
 		Hint:      testHint,
 		Out:       &f.out,
 		Now:       func() time.Time { return testNow },
+		Wait:      10 * time.Second,
 	}
 	return f
 }
@@ -209,12 +211,16 @@ func TestSlowServer(t *testing.T) {
 		<-release
 		releaseHandler("v0.6.0")(w, r)
 	})
+	f.checker.Wait = 50 * time.Millisecond
 	checkedAt := testNow.Add(-25 * time.Hour)
 	seedCache(t, f, checkedAt, "0.5.0")
 	finish := f.checker.Start()
-	// Registered after server cleanup so the blocked handlers are released first.
+	// Registered last so it runs before the temp directory is removed: release the
+	// blocked handler, then wait until that request and its cache write finish.
 	t.Cleanup(func() {
 		close(release)
+		f.server.Close()
+		f.checker.Wait = 10 * time.Second
 		finish()
 	})
 	started := time.Now()
@@ -238,10 +244,14 @@ func TestInterruptedCheck(t *testing.T) {
 		<-release
 		releaseHandler("v9.9.9")(w, r)
 	})
+	f.checker.Wait = 50 * time.Millisecond
 	finish := f.checker.Start()
-	// Registered after server cleanup so the blocked handlers are released first.
+	// Registered last so it runs before the temp directory is removed: release the
+	// blocked handler, then wait until that request and its cache write finish.
 	t.Cleanup(func() {
 		close(release)
+		f.server.Close()
+		f.checker.Wait = 10 * time.Second
 		finish()
 	})
 	started := time.Now()
