@@ -22,6 +22,7 @@ var commands = []command{
 	{"remote", "List, add or remove skill sources in kitt.toml"},
 	{"upgrade", "Upgrade all skills or one skill, showing what changes"},
 	{"list", "List installed and available skills"},
+	{"show", "Show a skill's description and versions without installing it"},
 	{"doctor", "Check skills, links and project docs for drift"},
 	{"release", "Tag and push a new version of a skill (skills repository)"},
 }
@@ -54,6 +55,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 		if c.name == "list" && args[0] == "list" {
 			return listCmd(args[1:], stdout, stderr)
+		}
+		if c.name == "show" && args[0] == "show" {
+			return showCmd(args[1:], stdout, stderr)
 		}
 		if c.name == "doctor" && args[0] == "doctor" {
 			return doctorCmd(args[1:], stdout, stderr)

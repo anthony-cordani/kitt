@@ -66,11 +66,12 @@ kitt never overwrites a file it did not create. On a project that already has an
 | `kitt remote rm <name>` | Removes an unused skill source (`-g` goes before `rm` for user-level sources). |
 | `kitt upgrade [skill] [--major]` | Moves skills to their newest release in the same major version, showing the diff of each skill. `--major` allows a new major version. Also moves transitive dependencies within their dependents' ranges. Exact pins (`1.2.0`) are kept. |
 | `kitt list` | Installed skills, and the skills available in each source with their latest release. |
+| `kitt show [source/]skill[@constraint]` | Shows a skill's description, the version pinned here and its published versions, without installing anything. Defaults to the latest release. Only the source cache is written. |
 | `kitt doctor` | Reports drift: skill modified locally, missing link, outdated `.gitignore` block or docs index, stale project docs. Also checks dependency pins, sources, cycles, snapshots, `via` and orphans. Exit code 2 when something is wrong. Changes nothing. |
 | `kitt release <skill>` | In a skills repository: tags and pushes a new version of a skill (see below). |
 | `kitt --version` | Prints the installed version. |
 
-`install`, `upgrade`, `list`, `remote` and `doctor` take `-g` to work on user-level skills instead of the current project. The first time, give the skills repository: `kitt install -g --source alias=url <skill>` creates the user `kitt.toml` (repeatable `--source`). In a project that already has a `kitt.toml`, `kitt install --source alias=url` or `kitt remote add alias url` adds the source to it.
+`install`, `upgrade`, `list`, `show`, `remote` and `doctor` take `-g` to work on user-level skills instead of the current project. The first time, give the skills repository: `kitt install -g --source alias=url <skill>` creates the user `kitt.toml` (repeatable `--source`). In a project that already has a `kitt.toml`, `kitt install --source alias=url` or `kitt remote add alias url` adds the source to it.
 
 ### Version constraints
 
