@@ -23,6 +23,10 @@ go install github.com/anthony-cordani/kitt/cmd/kitt@latest
 
 Binaries for every platform are also attached to each [GitHub release](https://github.com/anthony-cordani/kitt/releases). kitt needs `git` in your `PATH`.
 
+### Update notice
+
+When a newer kitt release exists, kitt prints one line on stderr with the command to run. It asks GitHub for the latest release at most once a day and sends nothing else. Nothing is printed outside a terminal or when `CI` is set. Set `KITT_NO_UPDATE_CHECK=1` to turn it off. kitt never updates itself.
+
 ## Quick start
 
 ```sh
