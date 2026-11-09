@@ -40,23 +40,23 @@ No skills repository yet? Start from the public sample [kitt-skills](https://git
 
 Then open your AI assistant in the project and ask it to set up the project. It runs the `kitt-bootstrap` skill: it fills in `AGENTS.md` from the code, proposes rules in `RULES.md`, writes the first project docs, then removes the setup marker.
 
-A teammate who clones the project runs `kitt install` once; after that, a git hook keeps the skills in sync on every pull and checkout.
+A teammate who clones the project runs `kitt init` once, which installs the git hooks and the skills. After that, the hook keeps skills in sync on every pull and checkout. Their AI assistant can do it for them: the kitt section of `AGENTS.md` tells it how.
 
 ## What kitt writes in a project
 
 | Path | Versioned | Role |
 |---|---|---|
 | `kitt.toml` | yes | Skill sources and pinned skills |
-| `AGENTS.md` | yes | What every assistant reads first; ends with the project memory index |
+| `AGENTS.md` | yes | What every assistant reads first; includes the project memory index and the kitt setup section |
 | `RULES.md` | yes | Team rules, for humans and assistants, checked in review |
 | `.agents/docs/` | yes | Project memory: one Markdown file per non-obvious topic |
 | `.agents/skills/` | no | Installed skills (restored by `kitt install`) |
 | `.claude/skills/<name>` | no | Links for Claude Code, one per skill |
 | `CLAUDE.md` | no | `@AGENTS.md`, so Claude Code reads the same file |
 | `.gitignore` | yes | A block managed by kitt for the unversioned paths |
-| `.git/hooks/post-merge`, `post-checkout` | no | Run `kitt install` after a pull or a checkout |
+| `.git/hooks/post-merge`, `post-checkout`, `pre-push` | no | Run `kitt install` after a pull or a checkout; warn about stale project docs before a push without ever blocking it |
 
-kitt never overwrites a file it did not create. On a project that already has an `AGENTS.md`, `kitt init` only appends the project memory section. Existing git hooks (git-lfs, husky through `core.hooksPath`) are kept: kitt appends its own block.
+kitt never overwrites a file it did not create. On a project that already has an `AGENTS.md`, `kitt init` appends what is missing: the project memory section and the kitt section. If `AGENTS.md` already mentions kitt, it leaves that text alone and says so. The Skills section written by an older kitt is replaced in place. Existing git hooks (git-lfs, husky through `core.hooksPath`) are kept: kitt appends its own block.
 
 ## Commands
 
@@ -72,6 +72,8 @@ kitt never overwrites a file it did not create. On a project that already has an
 | `kitt list` | Installed skills, the skills available in each source with their latest release, and the updates `kitt upgrade` would apply. |
 | `kitt show [source/]skill[@constraint]` | Shows a skill's description, the version pinned here and its published versions, without installing anything. Defaults to the latest release. Only the source cache is written. |
 | `kitt doctor` | Reports drift: skill modified locally, missing link, outdated `.gitignore` block or docs index, stale project docs. Also checks dependency pins, sources, cycles, snapshots, `via` and orphans. Exit code 2 when something is wrong. Changes nothing. |
+| `kitt doctor --docs` | Checks only the project docs; needs neither skills nor a manifest. Exit code 2 when problems are found. |
+| `kitt doctor --warn` | Prints problems only; always exits 0 unless the check itself fails. |
 | `kitt release <skill>` | In a skills repository: tags and pushes a new version of a skill (see below). |
 | `kitt --version` | Prints the installed version. |
 
@@ -156,7 +158,13 @@ verified: 3f2a9c1e…
 ---
 ```
 
-`kitt doctor` reports a document as stale when the code under `paths` changed after the `verified` commit.
+`kitt doctor` reports a document as stale when the code under `paths` changed after the `verified` commit. The pre-push hook warns about stale docs and never blocks a push.
+
+### In CI
+
+A stale doc means the code under `paths` changed since `verified`, not that the doc is wrong. Warn by default and fail only if the project wants it: `kitt doctor --docs --warn` warns, with GitHub annotations under GitHub Actions; `kitt doctor --docs` fails with exit code 2.
+
+CI needs the full history: use `fetch-depth: 0` for `actions/checkout`, or `GIT_DEPTH: 0` on GitLab. On GitLab, `kitt doctor --docs` with `allow_failure: {exit_codes: [2]}` shows a warning on the job.
 
 ## Skills repositories
 

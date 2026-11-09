@@ -35,7 +35,7 @@ func TestInitHookKeepsNonShellInterpreter(t *testing.T) {
 	const original = "#!/usr/bin/env python3\nprint('keep')\n"
 	testutil.WriteFile(t, path, original)
 	var out bytes.Buffer
-	if err := initHook(path, "post-checkout", &out); err != nil {
+	if err := initHook(path, "post-checkout", hookBlock, &out); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(path)
@@ -71,7 +71,7 @@ func TestInitHookReplacesOldManagedBlockInPlace(t *testing.T) {
 		"fi\n" +
 		"# <<< kitt\n"
 	testutil.WriteFile(t, path, before+oldBlock+after)
-	if err := initHook(path, "post-checkout", io.Discard); err != nil {
+	if err := initHook(path, "post-checkout", hookBlock, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(path)
@@ -89,7 +89,7 @@ func TestHookWithoutManifestIsSilent(t *testing.T) {
 	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "post-checkout")
-	if err := initHook(path, "post-checkout", io.Discard); err != nil {
+	if err := initHook(path, "post-checkout", hookBlock, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	cmd := exec.Command("sh", path)

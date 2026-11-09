@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -122,26 +123,70 @@ func initAgents(root string, out io.Writer) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("read AGENTS.md: %w", err)
 	}
-	if lineIndex(string(data), templates.DocsStart) >= 0 {
-		fmt.Fprintln(out, "kept AGENTS.md")
+	updated := string(data)
+	var messages []string
+	if lineIndex(updated, templates.DocsStart) < 0 {
+		section := "## Project memory\n\n" +
+			"Before reading code on a specific topic, check whether a document below already explains it. When you learn something non-obvious about this project, write it down in `.agents/docs/` (format: [.agents/docs/README.md](.agents/docs/README.md)).\n\n" +
+			templates.DocsStart + "\n" + templates.DocsEnd + "\n"
+		updated = appendSection(updated, section)
+		messages = append(messages, "updated AGENTS.md (project memory section)")
+	}
+	legacy := regexp.MustCompile(`(?m)^## Skills\r?\n\r?\n` + regexp.QuoteMeta(templates.LegacySkillsLine) + `(?:\r?\n|$)`)
+	switch {
+	case lineIndex(updated, templates.KittStart) >= 0:
+	case legacy.MatchString(updated):
+		loc := legacy.FindStringIndex(updated)
+		updated = updated[:loc[0]] + templates.KittSection + updated[loc[1]:]
+		messages = append(messages, "updated AGENTS.md (kitt section)")
+	case mentionsKitt(updated):
+		messages = append(messages, "kept AGENTS.md kitt text (check it tells assistants how to install kitt)")
+	default:
+		updated = appendSection(updated, templates.KittSection)
+		messages = append(messages, "updated AGENTS.md (kitt section)")
+	}
+	if updated == string(data) {
+		printAgentsMessages(out, messages)
 		return false, nil
 	}
-	section := "## Project memory\n\n" +
-		"Before reading code on a specific topic, check whether a document below already explains it. When you learn something non-obvious about this project, write it down in `.agents/docs/` (format: [.agents/docs/README.md](.agents/docs/README.md)).\n\n" +
-		templates.DocsStart + "\n" + templates.DocsEnd + "\n"
-	updated := string(data)
-	if !strings.HasSuffix(updated, "\n") {
-		updated += "\n"
-	}
-	updated += "\n" + section
 	if err := os.WriteFile(path, []byte(updated), 0o644); err != nil {
 		return false, fmt.Errorf("update AGENTS.md: %w", err)
 	}
 	if err := os.Chmod(path, 0o644); err != nil {
 		return false, fmt.Errorf("set AGENTS.md permissions: %w", err)
 	}
-	fmt.Fprintln(out, "updated AGENTS.md (project memory section)")
+	printAgentsMessages(out, messages)
 	return false, nil
+}
+
+func appendSection(text, section string) string {
+	if !strings.HasSuffix(text, "\n") {
+		text += "\n"
+	}
+	return text + "\n" + section
+}
+
+func mentionsKitt(text string) bool {
+	word := regexp.MustCompile(`(?i)\bkitt\b`)
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "<!-- kitt:") || strings.HasPrefix(line, "> **Setup pending.**") {
+			continue
+		}
+		if word.MatchString(line) {
+			return true
+		}
+	}
+	return false
+}
+
+func printAgentsMessages(out io.Writer, messages []string) {
+	if len(messages) == 0 {
+		fmt.Fprintln(out, "kept AGENTS.md")
+	}
+	for _, message := range messages {
+		fmt.Fprintln(out, message)
+	}
 }
 
 func initTemplate(root, name, template string, out io.Writer) (bool, error) {
@@ -191,6 +236,16 @@ const (
 		"fi\n" + hookEnd + "\n"
 )
 
+// A pre-push hook's exit status decides whether git pushes. Preserve an earlier
+// failure so appending this block cannot unblock a push. The subshell sets the
+// status without ending the script; /dev/null leaves refs on stdin for later code.
+const prePushBlock = hookStart + "\n" +
+	"kitt_status=$?\n" +
+	"if [ -f kitt.toml ] && command -v kitt >/dev/null 2>&1; then\n" +
+	"  kitt doctor --docs --warn </dev/null >&2 || echo \"kitt: docs check failed, run kitt doctor --docs\" >&2\n" +
+	"fi\n" +
+	"(exit \"$kitt_status\")\n" + hookEnd + "\n"
+
 func initHooks(root string, out io.Writer) error {
 	cmd := exec.Command("git", "-C", root, "rev-parse", "--git-path", "hooks")
 	for _, entry := range os.Environ() {
@@ -213,15 +268,19 @@ func initHooks(root string, out io.Writer) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create hooks directory: %w", err)
 	}
-	for _, name := range []string{"post-merge", "post-checkout"} {
-		if err := initHook(filepath.Join(dir, name), name, out); err != nil {
+	for _, name := range []string{"post-merge", "post-checkout", "pre-push"} {
+		block := hookBlock
+		if name == "pre-push" {
+			block = prePushBlock
+		}
+		if err := initHook(filepath.Join(dir, name), name, block, out); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func initHook(path, name string, out io.Writer) error {
+func initHook(path, name, block string, out io.Writer) error {
 	data, err := os.ReadFile(path)
 	missing := errors.Is(err, fs.ErrNotExist)
 	if err != nil && !missing {
@@ -249,16 +308,16 @@ func initHook(path, name string, out io.Writer) error {
 	}
 	updated := existing
 	if missing {
-		updated = "#!/bin/sh\n" + hookBlock
+		updated = "#!/bin/sh\n" + block
 	} else if start := lineIndex(existing, hookStart); start >= 0 {
 		afterStart := lineEnd(existing, start)
 		if end := lineIndex(existing[afterStart:], hookEnd); end >= 0 {
-			updated = existing[:start] + hookBlock + existing[lineEnd(existing, afterStart+end):]
+			updated = existing[:start] + block + existing[lineEnd(existing, afterStart+end):]
 		} else {
-			updated = appendHook(existing)
+			updated = appendHook(existing, block)
 		}
 	} else {
-		updated = appendHook(existing)
+		updated = appendHook(existing, block)
 	}
 	if updated == existing {
 		return nil
@@ -273,11 +332,11 @@ func initHook(path, name string, out io.Writer) error {
 	return nil
 }
 
-func appendHook(existing string) string {
+func appendHook(existing, block string) string {
 	if !strings.HasSuffix(existing, "\n") {
 		existing += "\n"
 	}
-	return existing + hookBlock
+	return existing + block
 }
 
 func lineIndex(text, marker string) int {

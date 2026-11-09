@@ -49,6 +49,9 @@ func TestInitCreatesProjectFiles(t *testing.T) {
 			t.Errorf("AGENTS.md missing %s", marker)
 		}
 	}
+	if strings.Count(string(agents), templates.KittStart) != 1 || strings.Count(string(agents), templates.KittSection) != 1 {
+		t.Fatalf("AGENTS.md must have exactly one kitt section:\n%s", agents)
+	}
 	if strings.Contains(string(agents), "Before any other task") {
 		t.Errorf("AGENTS.md setup note diverts unrelated tasks:\n%s", agents)
 	}
@@ -63,7 +66,7 @@ func TestInitCreatesProjectFiles(t *testing.T) {
 		t.Fatalf("CLAUDE.md = %q, want %q", claude, templates.ClaudeMD)
 	}
 
-	for _, name := range []string{"post-merge", "post-checkout"} {
+	for _, name := range []string{"post-merge", "post-checkout", "pre-push"} {
 		requireKittHook(t, filepath.Join(repo, ".git", "hooks", name))
 	}
 
@@ -185,7 +188,7 @@ func TestInitAppendsKittBlockToCustomHooksPath(t *testing.T) {
 	postMerge := filepath.Join(repo, ".husky", "post-merge")
 	requireKittHook(t, postMerge)
 
-	for _, name := range []string{"post-merge", "post-checkout"} {
+	for _, name := range []string{"post-merge", "post-checkout", "pre-push"} {
 		path := filepath.Join(repo, ".git", "hooks", name)
 		if _, err := os.Lstat(path); err == nil {
 			t.Errorf("hook written under .git/hooks/%s", name)
@@ -353,7 +356,7 @@ func requireKittHook(t *testing.T, path string) {
 	}
 	for _, fragment := range []string{
 		"# >>> kitt (managed by kitt, do not edit)",
-		"kitt install",
+		hookCommand(path),
 		"# <<< kitt",
 	} {
 		if !strings.Contains(text, fragment) {
@@ -370,6 +373,13 @@ func requireKittHook(t *testing.T, path string) {
 	if info.Mode().Perm()&0o111 == 0 {
 		t.Fatalf("%s is not executable (%v)", path, info.Mode())
 	}
+}
+
+func hookCommand(path string) string {
+	if filepath.Base(path) == "pre-push" {
+		return "kitt doctor --docs --warn"
+	}
+	return "kitt install"
 }
 
 func buildKitt(t *testing.T, bin string) {

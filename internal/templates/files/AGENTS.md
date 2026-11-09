@@ -26,6 +26,15 @@ Before reading code on a specific topic, check whether a document below already 
 <!-- kitt:docs:start -->
 <!-- kitt:docs:end -->
 
+<!-- kitt:setup:start -->
 ## Skills
 
-Project skills live in `.agents/skills/`. They are pinned in `kitt.toml` and installed with `kitt install`.
+This project's AI skills are managed by [kitt](https://github.com/anthony-cordani/kitt): pinned in `kitt.toml`, installed in `.agents/skills/`, which git does not track. A fresh clone has none of them.
+
+If `kitt.toml` pins skills and `.agents/skills/` is missing, set the project up before your task:
+
+1. Run `kitt --version`. If kitt is not installed, tell the developer and install it only with their agreement, using the [install instructions](https://github.com/anthony-cordani/kitt#install) for their system.
+2. Run `kitt init`. On a project that already has its files, it only adds what is missing, installs the git hooks and restores the pinned skills.
+
+If `kitt init` fails, report the error to the developer and carry on with the task.
+<!-- kitt:setup:end -->

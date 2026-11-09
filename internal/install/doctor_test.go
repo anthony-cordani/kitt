@@ -1,12 +1,14 @@
 package install_test
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/anthony-cordani/kitt/internal/install"
 	"github.com/anthony-cordani/kitt/internal/testutil"
 )
 
@@ -233,4 +235,32 @@ func writeFlowDoc(t *testing.T, project, front string) {
 	t.Helper()
 	testutil.WriteFile(t, filepath.Join(project, "AGENTS.md"), "BEFORE\n<!-- kitt:docs:start -->\n<!-- kitt:docs:end -->\nAFTER\n")
 	testutil.WriteFile(t, filepath.Join(project, ".agents", "docs", "flow.md"), "---\n"+front+"---\nThe flow.\n")
+}
+
+func TestDoctorDocsMissingCommitHistory(t *testing.T) {
+	testutil.IsolateHome(t)
+	project := testutil.NewRepo(t)
+	testutil.WriteFile(t, filepath.Join(project, "app.go"), "package app\n")
+	verified := testutil.Commit(t, project, "app")
+	testutil.WriteFile(t, filepath.Join(project, ".agents", "docs", "flow.md"), fmt.Sprintf("---\npaths: [app.go]\nverified: %s\n---\nFlow\n", verified))
+	testutil.Commit(t, project, "doc")
+	parent := t.TempDir()
+	testutil.Git(t, parent, "clone", "--depth", "1", testutil.URL(project), "shallow")
+	shallow := filepath.Join(parent, "shallow")
+	if got := testutil.Git(t, shallow, "rev-parse", "--is-shallow-repository"); got != "true" {
+		t.Fatalf("clone is not shallow: %q", got)
+	}
+	var buf bytes.Buffer
+	n, err := install.DoctorDocs(install.Options{Root: shallow, Out: &buf})
+	want := fmt.Sprintf("unverified doc: .agents/docs/flow.md (commit %s not found: shallow clone, fetch the full history)\n1 problem(s)\n", verified[:7])
+	if err != nil || n != 1 || buf.String() != want {
+		t.Fatalf("DoctorDocs = %d, %v, %q; want %q", n, err, buf.String(), want)
+	}
+	testutil.WriteFile(t, filepath.Join(project, ".agents", "docs", "flow.md"), "---\npaths: [app.go]\nverified: abcdefabcdefabcdefabcdefabcdefabcdefabcd\n---\nFlow\n")
+	buf.Reset()
+	n, err = install.DoctorDocs(install.Options{Root: project, Out: &buf})
+	want = "unverified doc: .agents/docs/flow.md (commit abcdefa not found)\n1 problem(s)\n"
+	if err != nil || n != 1 || buf.String() != want {
+		t.Fatalf("DoctorDocs = %d, %v, %q; want %q", n, err, buf.String(), want)
+	}
 }
