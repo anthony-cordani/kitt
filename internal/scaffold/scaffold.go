@@ -140,7 +140,7 @@ func initAgents(root string, out io.Writer) (bool, error) {
 		updated = updated[:loc[0]] + templates.KittSection + updated[loc[1]:]
 		messages = append(messages, "updated AGENTS.md (kitt section)")
 	case mentionsKitt(updated):
-		messages = append(messages, "kept AGENTS.md kitt text (check it tells assistants how to install kitt)")
+		messages = append(messages, "kept AGENTS.md (it already mentions kitt)")
 	default:
 		updated = appendSection(updated, templates.KittSection)
 		messages = append(messages, "updated AGENTS.md (kitt section)")

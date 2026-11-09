@@ -40,14 +40,14 @@ No skills repository yet? Start from the public sample [kitt-skills](https://git
 
 Then open your AI assistant in the project and ask it to set up the project. It runs the `kitt-bootstrap` skill: it fills in `AGENTS.md` from the code, proposes rules in `RULES.md`, writes the first project docs, then removes the setup marker.
 
-A teammate who clones the project runs `kitt init` once, which installs the git hooks and the skills. After that, the hook keeps skills in sync on every pull and checkout. Their AI assistant can do it for them: the kitt section of `AGENTS.md` tells it how.
+A teammate who clones the project runs `kitt init` once, which installs the git hooks and the skills. After that, the hook keeps skills in sync on every pull and checkout.
 
 ## What kitt writes in a project
 
 | Path | Versioned | Role |
 |---|---|---|
 | `kitt.toml` | yes | Skill sources and pinned skills |
-| `AGENTS.md` | yes | What every assistant reads first; includes the project memory index and the kitt setup section |
+| `AGENTS.md` | yes | What every assistant reads first; includes the project memory index and the kitt section |
 | `RULES.md` | yes | Team rules, for humans and assistants, checked in review |
 | `.agents/docs/` | yes | Project memory: one Markdown file per non-obvious topic, in subfolders if you want |
 | `.agents/skills/` | no | Installed skills (restored by `kitt install`) |

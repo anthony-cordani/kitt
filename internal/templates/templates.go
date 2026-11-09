@@ -29,18 +29,11 @@ const (
 	KittEnd   = "<!-- kitt:setup:end -->"
 )
 
-// KittSection tells assistants how to restore the project setup on a fresh clone.
+// KittSection says where the project skills live and how they are installed.
 const KittSection = KittStart + "\n" +
 	"## Skills\n" +
 	"\n" +
-	"This project's AI skills are managed by [kitt](https://github.com/anthony-cordani/kitt): pinned in `kitt.toml`, installed in `.agents/skills/`, which git does not track. A fresh clone has none of them.\n" +
-	"\n" +
-	"If `kitt.toml` pins skills and `.agents/skills/` is missing, set the project up before your task:\n" +
-	"\n" +
-	"1. Run `kitt --version`. If kitt is not installed, tell the developer and install it only with their agreement, using the [install instructions](https://github.com/anthony-cordani/kitt#install) for their system.\n" +
-	"2. Run `kitt init`. On a project that already has its files, it only adds what is missing, installs the git hooks and restores the pinned skills.\n" +
-	"\n" +
-	"If `kitt init` fails, report the error to the developer and carry on with the task.\n" +
+	"Project skills live in `.agents/skills/`. They are pinned in `kitt.toml` and installed with [kitt](https://github.com/anthony-cordani/kitt): run `kitt init` once on a fresh clone.\n" +
 	KittEnd + "\n"
 
 // LegacySkillsLine identifies the Skills section written by older kitt versions.

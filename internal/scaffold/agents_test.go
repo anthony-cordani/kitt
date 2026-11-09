@@ -81,7 +81,7 @@ func TestInitExistingAgentsKittSection(t *testing.T) {
 				want = append(want, "updated AGENTS.md (kitt section)")
 			}
 			if tc.mention {
-				want = append(want, "kept AGENTS.md kitt text (check it tells assistants how to install kitt)")
+				want = append(want, "kept AGENTS.md (it already mentions kitt)")
 			}
 			if len(want) == 0 {
 				want = append(want, "kept AGENTS.md")
