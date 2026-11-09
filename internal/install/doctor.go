@@ -226,22 +226,10 @@ func (d *doctor) docs(agents string) error {
 
 func (d *doctor) staleDocs() error {
 	dir := filepath.Join(d.p.root, ".agents", "docs")
-	entries, err := os.ReadDir(dir)
+	names, err := listDocs(dir)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil
-		}
-		return fmt.Errorf("read project docs dir: %w", err)
+		return err
 	}
-	names := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() || name == "README.md" || !strings.HasSuffix(name, ".md") {
-			continue
-		}
-		names = append(names, name)
-	}
-	sort.Strings(names)
 	commitID := regexp.MustCompile(`^[0-9a-f]{7,64}$`)
 	for _, name := range names {
 		if err := d.staleDoc(dir, name, commitID); err != nil {
@@ -252,7 +240,7 @@ func (d *doctor) staleDocs() error {
 }
 
 func (d *doctor) staleDoc(dir, name string, commitID *regexp.Regexp) error {
-	data, err := os.ReadFile(filepath.Join(dir, name))
+	data, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(name)))
 	if err != nil {
 		return fmt.Errorf("read project doc %s: %w", name, err)
 	}

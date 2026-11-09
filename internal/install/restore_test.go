@@ -437,10 +437,49 @@ func TestDocsIndexUsesNameOrderAndKeepsOutside(t *testing.T) {
 	}
 }
 
+func TestDocsIndexIncludesSubfolders(t *testing.T) {
+	project, _ := standard(t)
+	agents := filepath.Join(project, "AGENTS.md")
+	const outside = "BEFORE-INDEX\n<!-- kitt:docs:start -->\nPLACEHOLDER\n<!-- kitt:docs:end -->\nAFTER-INDEX\n"
+	testutil.WriteFile(t, agents, outside)
+	testutil.WriteFile(t, filepath.Join(project, ".agents", "docs", "top.md"), "# Top\n")
+	testutil.WriteFile(t, filepath.Join(project, ".agents", "docs", "adrs", "0001-first.md"), "# First\n")
+	testutil.WriteFile(t, filepath.Join(project, ".agents", "docs", "adrs", "README.md"), "# ADRs\n")
+	testutil.WriteFile(t, filepath.Join(project, ".agents", "docs", "toto", "deep", "note.md"), "# Deep note\n")
+	testutil.WriteFile(t, filepath.Join(project, ".agents", "docs", "toto", "notes.txt"), "not a doc\n")
+
+	mustAdd(t, project, "demo/review@^1")
+
+	want := "BEFORE-INDEX\n<!-- kitt:docs:start -->\n" +
+		"- [0001-first](.agents/docs/adrs/0001-first.md)\n" +
+		"- [top](.agents/docs/top.md)\n" +
+		"- [note](.agents/docs/toto/deep/note.md)\n" +
+		"<!-- kitt:docs:end -->\nAFTER-INDEX\n"
+	if got := readText(t, agents); got != want {
+		t.Fatalf("AGENTS.md =\n%s\nwant\n%s", got, want)
+	}
+}
+
+func TestDocsIndexEscapesSubfolderPathSegments(t *testing.T) {
+	project, _ := standard(t)
+	agents := filepath.Join(project, "AGENTS.md")
+	testutil.WriteFile(t, agents, "<!-- kitt:docs:start -->\n<!-- kitt:docs:end -->\n")
+	testutil.WriteFile(t, filepath.Join(project, ".agents", "docs", "adrs", "my doc.md"), "# Topic\n")
+
+	mustAdd(t, project, "demo/review@^1")
+
+	if got := readText(t, agents); !strings.Contains(got, "- [my doc](.agents/docs/adrs/my%20doc.md)\n") {
+		t.Fatalf("AGENTS.md does not contain escaped subfolder link:\n%s", got)
+	}
+}
+
 func TestDocsIndexEmptySaysNoDocs(t *testing.T) {
 	project, _ := standard(t)
 	agents := filepath.Join(project, "AGENTS.md")
 	testutil.WriteFile(t, agents, "BEFORE-INDEX\n<!-- kitt:docs:start -->\nPLACEHOLDER\n<!-- kitt:docs:end -->\nAFTER-INDEX\n")
+	if err := os.MkdirAll(filepath.Join(project, ".agents", "docs", "adrs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 
 	mustRestore(t, project)
 

@@ -49,6 +49,23 @@ func TestRunDoctorDocsWithoutManifest(t *testing.T) {
 	}
 }
 
+func TestRunDoctorDocsReportsStaleSubfolderDoc(t *testing.T) {
+	testutil.IsolateHome(t)
+	t.Setenv("GITHUB_ACTIONS", "false")
+	project := testutil.NewRepo(t)
+	t.Chdir(project)
+	app := filepath.Join(project, "app.go")
+	testutil.WriteFile(t, app, "package app\n")
+	verified := testutil.Commit(t, project, "app")
+	doc := fmt.Sprintf("---\npaths: [app.go]\nverified: %s\n---\nFlow\n", verified)
+	testutil.WriteFile(t, filepath.Join(project, ".agents", "docs", "adrs", "flow.md"), doc)
+	testutil.WriteFile(t, app, "package app\n// changed\n")
+	testutil.Commit(t, project, "change app")
+
+	problem := fmt.Sprintf("stale doc: .agents/docs/adrs/flow.md (app.go changed since %s)\n", verified[:7])
+	doctorOutput(t, []string{"--docs"}, 2, problem+"1 problem(s)\n", "")
+}
+
 func TestRunDoctorDocsOutsideProject(t *testing.T) {
 	testutil.IsolateHome(t)
 	root := t.TempDir()

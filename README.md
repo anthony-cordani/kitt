@@ -49,7 +49,7 @@ A teammate who clones the project runs `kitt init` once, which installs the git 
 | `kitt.toml` | yes | Skill sources and pinned skills |
 | `AGENTS.md` | yes | What every assistant reads first; includes the project memory index and the kitt setup section |
 | `RULES.md` | yes | Team rules, for humans and assistants, checked in review |
-| `.agents/docs/` | yes | Project memory: one Markdown file per non-obvious topic |
+| `.agents/docs/` | yes | Project memory: one Markdown file per non-obvious topic, in subfolders if you want |
 | `.agents/skills/` | no | Installed skills (restored by `kitt install`) |
 | `.claude/skills/<name>` | no | Links for Claude Code, one per skill |
 | `CLAUDE.md` | no | `@AGENTS.md`, so Claude Code reads the same file |
@@ -147,6 +147,8 @@ You can edit `[sources]` and the `source` / `version` of a skill by hand; `kitt 
 ## Project memory
 
 `.agents/docs/` holds what the code does not say: a flow, a decision, a trap. `AGENTS.md` tells assistants to check it before exploring the code, and kitt keeps its index up to date.
+
+Docs can live in subfolders, such as `.agents/docs/adrs/`: kitt indexes and checks them all. A `README.md` stays out of the index, in any folder.
 
 ```markdown
 ---

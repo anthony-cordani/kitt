@@ -1,6 +1,6 @@
 # Project memory
 
-Each file in this folder explains one topic of the project that is not obvious from the code: a flow, a decision, a trap. AI assistants read the index in `AGENTS.md` before exploring the code, and add a document here when they learn something worth keeping.
+Each file in this folder or its subfolders (`adrs/`, for example) explains one topic of the project that is not obvious from the code: a flow, a decision, a trap. AI assistants read the index in `AGENTS.md` before exploring the code, and add a document here when they learn something worth keeping.
 
 ## Format
 

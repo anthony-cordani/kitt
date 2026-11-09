@@ -161,27 +161,60 @@ func exactLineIndex(s, marker string) int {
 	return -1
 }
 
-func docsIndex(dir string) (string, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return "", fmt.Errorf("read project docs dir: %w", err)
-	}
-	var index strings.Builder
-	for _, entry := range entries {
+// listDocs returns the project docs under dir as slash-separated relative paths,
+// subfolders included. A README.md describes its folder and is not a doc.
+func listDocs(dir string) ([]string, error) {
+	var docs []string
+	err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			if path == dir && errors.Is(err, fs.ErrNotExist) {
+				return fs.SkipAll
+			}
+			return err
+		}
 		name := entry.Name()
 		if entry.IsDir() || name == "README.md" || !strings.HasSuffix(name, ".md") {
-			continue
+			return nil
 		}
-		data, err := os.ReadFile(filepath.Join(dir, name))
+		rel, err := filepath.Rel(dir, path)
 		if err != nil {
-			return "", fmt.Errorf("read project doc %s: %w", name, err)
+			return err
+		}
+		docs = append(docs, filepath.ToSlash(rel))
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("read project docs dir: %w", err)
+	}
+	return docs, nil
+}
+
+// docLink escapes each segment of a slash-separated path, keeping the slashes.
+func docLink(rel string) string {
+	parts := strings.Split(rel, "/")
+	for i, part := range parts {
+		parts[i] = url.PathEscape(part)
+	}
+	return strings.Join(parts, "/")
+}
+
+func docsIndex(dir string) (string, error) {
+	docs, err := listDocs(dir)
+	if err != nil {
+		return "", err
+	}
+	var index strings.Builder
+	for _, rel := range docs {
+		data, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(rel)))
+		if err != nil {
+			return "", fmt.Errorf("read project doc %s: %w", rel, err)
 		}
 		title, description := docFrontmatter(string(data))
 		if title == "" {
-			title = strings.TrimSuffix(name, ".md")
+			title = strings.TrimSuffix(rel[strings.LastIndex(rel, "/")+1:], ".md")
 		}
 		title = strings.NewReplacer(`\`, `\\`, `[`, `\[`, `]`, `\]`).Replace(title)
-		fmt.Fprintf(&index, "- [%s](.agents/docs/%s)", title, url.PathEscape(name))
+		fmt.Fprintf(&index, "- [%s](.agents/docs/%s)", title, docLink(rel))
 		if description != "" {
 			fmt.Fprintf(&index, " — %s", description)
 		}
