@@ -22,3 +22,19 @@ const (
 
 // ClaudeMD is the content of a CLAUDE.md managed by kitt.
 const ClaudeMD = "@AGENTS.md\n"
+
+// KittStart and KittEnd delimit the kitt section in AGENTS.md.
+const (
+	KittStart = "<!-- kitt:setup:start -->"
+	KittEnd   = "<!-- kitt:setup:end -->"
+)
+
+// KittSection says where the project skills live and how they are installed.
+const KittSection = KittStart + "\n" +
+	"## Skills\n" +
+	"\n" +
+	"Project skills live in `.agents/skills/`. They are pinned in `kitt.toml` and installed with [kitt](https://github.com/anthony-cordani/kitt): run `kitt init` once on a fresh clone.\n" +
+	KittEnd + "\n"
+
+// LegacySkillsLine identifies the Skills section written by older kitt versions.
+const LegacySkillsLine = "Project skills live in `.agents/skills/`. They are pinned in `kitt.toml` and installed with `kitt install`."

@@ -161,27 +161,67 @@ func exactLineIndex(s, marker string) int {
 	return -1
 }
 
-func docsIndex(dir string) (string, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return "", fmt.Errorf("read project docs dir: %w", err)
+// listDocs returns the project docs under dir as slash-separated relative paths,
+// subfolders included. A README.md describes its folder and is not a doc.
+// It uses os.ReadDir rather than filepath.WalkDir, which does not follow a
+// symlinked dir. Symlinks found inside dir are not followed.
+func listDocs(dir string) ([]string, error) {
+	return listDocsIn(dir, "")
+}
+
+func listDocsIn(dir, prefix string) ([]string, error) {
+	entries, err := os.ReadDir(filepath.Join(dir, filepath.FromSlash(prefix)))
+	if err != nil {
+		if prefix == "" && errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read project docs dir: %w", err)
 	}
-	var index strings.Builder
+	var docs []string
 	for _, entry := range entries {
 		name := entry.Name()
-		if entry.IsDir() || name == "README.md" || !strings.HasSuffix(name, ".md") {
+		if entry.IsDir() {
+			sub, err := listDocsIn(dir, prefix+name+"/")
+			if err != nil {
+				return nil, err
+			}
+			docs = append(docs, sub...)
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(dir, name))
+		if name == "README.md" || !strings.HasSuffix(name, ".md") {
+			continue
+		}
+		docs = append(docs, prefix+name)
+	}
+	return docs, nil
+}
+
+// docLink escapes each segment of a slash-separated path, keeping the slashes.
+func docLink(rel string) string {
+	parts := strings.Split(rel, "/")
+	for i, part := range parts {
+		parts[i] = url.PathEscape(part)
+	}
+	return strings.Join(parts, "/")
+}
+
+func docsIndex(dir string) (string, error) {
+	docs, err := listDocs(dir)
+	if err != nil {
+		return "", err
+	}
+	var index strings.Builder
+	for _, rel := range docs {
+		data, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(rel)))
 		if err != nil {
-			return "", fmt.Errorf("read project doc %s: %w", name, err)
+			return "", fmt.Errorf("read project doc %s: %w", rel, err)
 		}
 		title, description := docFrontmatter(string(data))
 		if title == "" {
-			title = strings.TrimSuffix(name, ".md")
+			title = strings.TrimSuffix(rel[strings.LastIndex(rel, "/")+1:], ".md")
 		}
 		title = strings.NewReplacer(`\`, `\\`, `[`, `\[`, `]`, `\]`).Replace(title)
-		fmt.Fprintf(&index, "- [%s](.agents/docs/%s)", title, url.PathEscape(name))
+		fmt.Fprintf(&index, "- [%s](.agents/docs/%s)", title, docLink(rel))
 		if description != "" {
 			fmt.Fprintf(&index, " — %s", description)
 		}

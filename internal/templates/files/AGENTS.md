@@ -26,6 +26,8 @@ Before reading code on a specific topic, check whether a document below already 
 <!-- kitt:docs:start -->
 <!-- kitt:docs:end -->
 
+<!-- kitt:setup:start -->
 ## Skills
 
-Project skills live in `.agents/skills/`. They are pinned in `kitt.toml` and installed with `kitt install`.
+Project skills live in `.agents/skills/`. They are pinned in `kitt.toml` and installed with [kitt](https://github.com/anthony-cordani/kitt): run `kitt init` once on a fresh clone.
+<!-- kitt:setup:end -->

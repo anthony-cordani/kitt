@@ -1,12 +1,14 @@
 package install_test
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/anthony-cordani/kitt/internal/install"
 	"github.com/anthony-cordani/kitt/internal/testutil"
 )
 
@@ -151,6 +153,38 @@ func TestDoctorStaleDoc(t *testing.T) {
 	))
 }
 
+func TestDoctorStaleSubfolderDoc(t *testing.T) {
+	project, skills := newPair(t)
+	testutil.Release(t, skills, "review", "1.0.0")
+	app := filepath.Join(project, "src", "app.go")
+	testutil.WriteFile(t, app, "package app\n")
+	verified := testutil.Commit(t, project, "app")
+	doc := filepath.Join(project, ".agents", "docs", "adrs", "x.md")
+	testutil.WriteFile(t, doc, fmt.Sprintf("---\npaths: [src/app.go]\nverified: %s\n---\nX\n", verified))
+	testutil.WriteFile(t, filepath.Join(project, "AGENTS.md"), healthyAgents)
+	writeKitt(t, project, map[string]string{"demo": testutil.URL(skills)})
+	mustAdd(t, project, "demo/review")
+	testutil.WriteFile(t, app, "package app\n// edited\n")
+	testutil.Commit(t, project, "edit app")
+
+	problem := fmt.Sprintf("stale doc: .agents/docs/adrs/x.md (src/app.go changed since %s)", verified[:7])
+	assertSingleProblem(t, project, problem)
+
+	var buf bytes.Buffer
+	n, err := install.DoctorDocs(install.Options{Root: project, Out: &buf})
+	want := problem + "\n1 problem(s)\n"
+	if err != nil || n != 1 || buf.String() != want {
+		t.Fatalf("DoctorDocs = %d, %v, %q; want %q", n, err, buf.String(), want)
+	}
+}
+
+func TestDoctorOutdatedDocsIndexForSubfolderDoc(t *testing.T) {
+	project := healthyProject(t)
+	testutil.WriteFile(t, filepath.Join(project, ".agents", "docs", "adrs", "x.md"), "# X\n")
+
+	assertSingleProblem(t, project, "outdated: AGENTS.md docs index (run kitt install)")
+}
+
 func TestDoctorUnverifiedDoc(t *testing.T) {
 	cases := []struct {
 		name, front, want string
@@ -233,4 +267,32 @@ func writeFlowDoc(t *testing.T, project, front string) {
 	t.Helper()
 	testutil.WriteFile(t, filepath.Join(project, "AGENTS.md"), "BEFORE\n<!-- kitt:docs:start -->\n<!-- kitt:docs:end -->\nAFTER\n")
 	testutil.WriteFile(t, filepath.Join(project, ".agents", "docs", "flow.md"), "---\n"+front+"---\nThe flow.\n")
+}
+
+func TestDoctorDocsMissingCommitHistory(t *testing.T) {
+	testutil.IsolateHome(t)
+	project := testutil.NewRepo(t)
+	testutil.WriteFile(t, filepath.Join(project, "app.go"), "package app\n")
+	verified := testutil.Commit(t, project, "app")
+	testutil.WriteFile(t, filepath.Join(project, ".agents", "docs", "flow.md"), fmt.Sprintf("---\npaths: [app.go]\nverified: %s\n---\nFlow\n", verified))
+	testutil.Commit(t, project, "doc")
+	parent := t.TempDir()
+	testutil.Git(t, parent, "clone", "--depth", "1", testutil.URL(project), "shallow")
+	shallow := filepath.Join(parent, "shallow")
+	if got := testutil.Git(t, shallow, "rev-parse", "--is-shallow-repository"); got != "true" {
+		t.Fatalf("clone is not shallow: %q", got)
+	}
+	var buf bytes.Buffer
+	n, err := install.DoctorDocs(install.Options{Root: shallow, Out: &buf})
+	want := fmt.Sprintf("unverified doc: .agents/docs/flow.md (commit %s not found: shallow clone, fetch the full history)\n1 problem(s)\n", verified[:7])
+	if err != nil || n != 1 || buf.String() != want {
+		t.Fatalf("DoctorDocs = %d, %v, %q; want %q", n, err, buf.String(), want)
+	}
+	testutil.WriteFile(t, filepath.Join(project, ".agents", "docs", "flow.md"), "---\npaths: [app.go]\nverified: abcdefabcdefabcdefabcdefabcdefabcdefabcd\n---\nFlow\n")
+	buf.Reset()
+	n, err = install.DoctorDocs(install.Options{Root: project, Out: &buf})
+	want = "unverified doc: .agents/docs/flow.md (commit abcdefa not found)\n1 problem(s)\n"
+	if err != nil || n != 1 || buf.String() != want {
+		t.Fatalf("DoctorDocs = %d, %v, %q; want %q", n, err, buf.String(), want)
+	}
 }

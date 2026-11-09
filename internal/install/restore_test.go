@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -437,10 +438,125 @@ func TestDocsIndexUsesNameOrderAndKeepsOutside(t *testing.T) {
 	}
 }
 
+func TestDocsIndexIncludesSubfolders(t *testing.T) {
+	project, _ := standard(t)
+	agents := filepath.Join(project, "AGENTS.md")
+	const outside = "BEFORE-INDEX\n<!-- kitt:docs:start -->\nPLACEHOLDER\n<!-- kitt:docs:end -->\nAFTER-INDEX\n"
+	testutil.WriteFile(t, agents, outside)
+	testutil.WriteFile(t, filepath.Join(project, ".agents", "docs", "top.md"), "# Top\n")
+	testutil.WriteFile(t, filepath.Join(project, ".agents", "docs", "adrs", "0001-first.md"), "# First\n")
+	testutil.WriteFile(t, filepath.Join(project, ".agents", "docs", "adrs", "README.md"), "# ADRs\n")
+	testutil.WriteFile(t, filepath.Join(project, ".agents", "docs", "toto", "deep", "note.md"), "# Deep note\n")
+	testutil.WriteFile(t, filepath.Join(project, ".agents", "docs", "toto", "notes.txt"), "not a doc\n")
+
+	mustAdd(t, project, "demo/review@^1")
+
+	want := "BEFORE-INDEX\n<!-- kitt:docs:start -->\n" +
+		"- [0001-first](.agents/docs/adrs/0001-first.md)\n" +
+		"- [top](.agents/docs/top.md)\n" +
+		"- [note](.agents/docs/toto/deep/note.md)\n" +
+		"<!-- kitt:docs:end -->\nAFTER-INDEX\n"
+	if got := readText(t, agents); got != want {
+		t.Fatalf("AGENTS.md =\n%s\nwant\n%s", got, want)
+	}
+}
+
+func TestDocsIndexEscapesSubfolderPathSegments(t *testing.T) {
+	project, _ := standard(t)
+	agents := filepath.Join(project, "AGENTS.md")
+	testutil.WriteFile(t, agents, "<!-- kitt:docs:start -->\n<!-- kitt:docs:end -->\n")
+	testutil.WriteFile(t, filepath.Join(project, ".agents", "docs", "my adrs", "my doc.md"), "# Topic\n")
+
+	mustAdd(t, project, "demo/review@^1")
+
+	if got := readText(t, agents); !strings.Contains(got, "- [my doc](.agents/docs/my%20adrs/my%20doc.md)\n") {
+		t.Fatalf("AGENTS.md does not contain escaped subfolder link:\n%s", got)
+	}
+}
+
+func TestDocsIndexFollowsSymlinkedDocsDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory symlinks are unavailable on Windows")
+	}
+	project, _ := standard(t)
+	agents := filepath.Join(project, "AGENTS.md")
+	testutil.WriteFile(t, agents, "<!-- kitt:docs:start -->\n<!-- kitt:docs:end -->\n")
+	target := filepath.Join(project, "docs-target")
+	testutil.WriteFile(t, filepath.Join(target, "guide.md"), "# Guide\n")
+	testutil.WriteFile(t, filepath.Join(target, "adrs", "x.md"), "# ADR X\n")
+	docsLink := filepath.Join(project, ".agents", "docs")
+	if err := os.MkdirAll(filepath.Dir(docsLink), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, docsLink); err != nil {
+		t.Skipf("cannot create directory symlink: %v", err)
+	}
+
+	mustAdd(t, project, "demo/review@^1")
+
+	got := readText(t, agents)
+	for _, want := range []string{
+		"- [guide](.agents/docs/guide.md)\n",
+		"- [x](.agents/docs/adrs/x.md)\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("AGENTS.md does not contain %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "_No project docs yet._") {
+		t.Fatalf("AGENTS.md lost docs index entries:\n%s", got)
+	}
+}
+
+func TestDocsIndexDoesNotFollowSymlinkedSubdirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory symlinks are unavailable on Windows")
+	}
+	project, _ := standard(t)
+	agents := filepath.Join(project, "AGENTS.md")
+	testutil.WriteFile(t, agents, "<!-- kitt:docs:start -->\n<!-- kitt:docs:end -->\n")
+	docs := filepath.Join(project, ".agents", "docs")
+	testutil.WriteFile(t, filepath.Join(docs, "visible.md"), "# Visible\n")
+	target := filepath.Join(project, "outside-docs")
+	testutil.WriteFile(t, filepath.Join(target, "hidden.md"), "# Hidden\n")
+	if err := os.Symlink(target, filepath.Join(docs, "linked")); err != nil {
+		t.Skipf("cannot create directory symlink: %v", err)
+	}
+
+	mustAdd(t, project, "demo/review@^1")
+
+	got := readText(t, agents)
+	if !strings.Contains(got, "- [visible](.agents/docs/visible.md)\n") {
+		t.Fatalf("AGENTS.md does not contain visible doc:\n%s", got)
+	}
+	if strings.Contains(got, "hidden") {
+		t.Fatalf("AGENTS.md contains docs behind a symlink:\n%s", got)
+	}
+}
+
+func TestDocsIndexRejectsRegularFileDocsPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("os.ReadDir reports no error for a regular file in Windows CI")
+	}
+	project, _ := standard(t)
+	agents := filepath.Join(project, "AGENTS.md")
+	testutil.WriteFile(t, agents, "<!-- kitt:docs:start -->\n<!-- kitt:docs:end -->\n")
+	testutil.WriteFile(t, filepath.Join(project, ".agents", "docs"), "not a directory\n")
+
+	opt, _ := withOpts(project, false)
+	err := install.Add(opt, "demo/review@^1")
+	if err == nil || !strings.Contains(err.Error(), "read project docs dir") {
+		t.Fatalf("Add error = %v, want read project docs dir", err)
+	}
+}
+
 func TestDocsIndexEmptySaysNoDocs(t *testing.T) {
 	project, _ := standard(t)
 	agents := filepath.Join(project, "AGENTS.md")
 	testutil.WriteFile(t, agents, "BEFORE-INDEX\n<!-- kitt:docs:start -->\nPLACEHOLDER\n<!-- kitt:docs:end -->\nAFTER-INDEX\n")
+	if err := os.MkdirAll(filepath.Join(project, ".agents", "docs", "adrs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 
 	mustRestore(t, project)
 

@@ -62,12 +62,44 @@ func Doctor(opts Options) (int, error) {
 			return 0, err
 		}
 	}
+	return d.summary(), nil
+}
+
+// DoctorDocs checks only the project docs index and doc freshness, without loading a manifest.
+// It changes nothing and returns the number of problems found.
+func DoctorDocs(opts Options) (int, error) {
+	p, err := locate(opts)
+	if err != nil {
+		return 0, err
+	}
+	agents, agentsExists, err := readAgents(p.root)
+	if err != nil {
+		return 0, err
+	}
+	if !agentsExists {
+		_, docsErr := os.Stat(filepath.Join(p.root, ".agents", "docs"))
+		_, manifestErr := os.Stat(filepath.Join(p.root, manifest.FileName))
+		if errors.Is(docsErr, fs.ErrNotExist) && errors.Is(manifestErr, fs.ErrNotExist) {
+			return 0, fmt.Errorf("no kitt.toml, AGENTS.md or .agents/docs in %s, run from the project root", p.root)
+		}
+	}
+	d := &doctor{p: p, out: outputOf(opts.Out)}
+	if err := d.docs(agents); err != nil {
+		return 0, err
+	}
+	if err := d.staleDocs(); err != nil {
+		return 0, err
+	}
+	return d.summary(), nil
+}
+
+func (d *doctor) summary() int {
 	if d.problems == 0 {
 		fmt.Fprintln(d.out, "ok")
 	} else {
 		fmt.Fprintf(d.out, "%d problem(s)\n", d.problems)
 	}
-	return d.problems, nil
+	return d.problems
 }
 
 // doctor is one read-only pass over a project or the user install.
@@ -194,22 +226,10 @@ func (d *doctor) docs(agents string) error {
 
 func (d *doctor) staleDocs() error {
 	dir := filepath.Join(d.p.root, ".agents", "docs")
-	entries, err := os.ReadDir(dir)
+	names, err := listDocs(dir)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil
-		}
-		return fmt.Errorf("read project docs dir: %w", err)
+		return err
 	}
-	names := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() || name == "README.md" || !strings.HasSuffix(name, ".md") {
-			continue
-		}
-		names = append(names, name)
-	}
-	sort.Strings(names)
 	commitID := regexp.MustCompile(`^[0-9a-f]{7,64}$`)
 	for _, name := range names {
 		if err := d.staleDoc(dir, name, commitID); err != nil {
@@ -220,7 +240,7 @@ func (d *doctor) staleDocs() error {
 }
 
 func (d *doctor) staleDoc(dir, name string, commitID *regexp.Regexp) error {
-	data, err := os.ReadFile(filepath.Join(dir, name))
+	data, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(name)))
 	if err != nil {
 		return fmt.Errorf("read project doc %s: %w", name, err)
 	}
@@ -248,6 +268,13 @@ func (d *doctor) staleDoc(dir, name string, commitID *regexp.Regexp) error {
 	case gitChanged:
 		d.line(fmt.Sprintf("stale doc: %s (%s changed since %s)", rel, strings.Join(meta.Paths, ", "), shortCommit(meta.Verified)))
 	case gitFailed:
+		cmd := exec.Command("git", "-C", d.p.root, "rev-parse", "--is-shallow-repository")
+		cmd.Env = stripGitEnv(os.Environ())
+		shallow, err := cmd.Output()
+		if err == nil && strings.TrimSpace(string(shallow)) == "true" {
+			d.line(fmt.Sprintf("unverified doc: %s (commit %s not found: shallow clone, fetch the full history)", rel, shortCommit(meta.Verified)))
+			return nil
+		}
 		d.line(fmt.Sprintf("unverified doc: %s (commit %s not found)", rel, shortCommit(meta.Verified)))
 	}
 	return nil
