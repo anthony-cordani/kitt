@@ -163,28 +163,35 @@ func exactLineIndex(s, marker string) int {
 
 // listDocs returns the project docs under dir as slash-separated relative paths,
 // subfolders included. A README.md describes its folder and is not a doc.
+// It uses os.ReadDir rather than filepath.WalkDir, which does not follow a
+// symlinked dir. Symlinks found inside dir are not followed.
 func listDocs(dir string) ([]string, error) {
-	var docs []string
-	err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			if path == dir && errors.Is(err, fs.ErrNotExist) {
-				return fs.SkipAll
-			}
-			return err
-		}
-		name := entry.Name()
-		if entry.IsDir() || name == "README.md" || !strings.HasSuffix(name, ".md") {
-			return nil
-		}
-		rel, err := filepath.Rel(dir, path)
-		if err != nil {
-			return err
-		}
-		docs = append(docs, filepath.ToSlash(rel))
-		return nil
-	})
+	return listDocsIn(dir, "")
+}
+
+func listDocsIn(dir, prefix string) ([]string, error) {
+	entries, err := os.ReadDir(filepath.Join(dir, filepath.FromSlash(prefix)))
 	if err != nil {
+		if prefix == "" && errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
 		return nil, fmt.Errorf("read project docs dir: %w", err)
+	}
+	var docs []string
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() {
+			sub, err := listDocsIn(dir, prefix+name+"/")
+			if err != nil {
+				return nil, err
+			}
+			docs = append(docs, sub...)
+			continue
+		}
+		if name == "README.md" || !strings.HasSuffix(name, ".md") {
+			continue
+		}
+		docs = append(docs, prefix+name)
 	}
 	return docs, nil
 }
