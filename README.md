@@ -72,7 +72,7 @@ kitt never overwrites a file it did not create. On a project that already has an
 | `kitt list` | Installed skills, the skills available in each source with their latest release, and the updates `kitt upgrade` would apply. |
 | `kitt show [source/]skill[@constraint]` | Shows a skill's description, the version pinned here and its published versions, without installing anything. Defaults to the latest release. Only the source cache is written. |
 | `kitt doctor` | Reports drift: skill modified locally, missing link, outdated `.gitignore` block or docs index, stale project docs. Also checks dependency pins, sources, cycles, snapshots, `via` and orphans. Exit code 2 when something is wrong. Changes nothing. |
-| `kitt doctor --docs` | Checks only the project docs; needs neither skills nor a manifest. Exit code 2 when problems are found. |
+| `kitt doctor --docs` | Checks only the project docs; needs neither skills nor a manifest. Exit code 2 when problems are found, 1 outside a project root. |
 | `kitt doctor --warn` | Prints problems only; always exits 0 unless the check itself fails. |
 | `kitt release <skill>` | In a skills repository: tags and pushes a new version of a skill (see below). |
 | `kitt --version` | Prints the installed version. |

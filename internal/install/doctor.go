@@ -72,9 +72,15 @@ func DoctorDocs(opts Options) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	agents, _, err := readAgents(p.root)
+	agents, agentsExists, err := readAgents(p.root)
 	if err != nil {
 		return 0, err
+	}
+	if !agentsExists {
+		_, err := os.Stat(filepath.Join(p.root, ".agents", "docs"))
+		if errors.Is(err, fs.ErrNotExist) {
+			return 0, fmt.Errorf("no AGENTS.md or .agents/docs in %s, run from the project root", p.root)
+		}
 	}
 	d := &doctor{p: p, out: outputOf(opts.Out)}
 	if err := d.docs(agents); err != nil {

@@ -135,3 +135,24 @@ func TestInitKittSectionMarkerTakesPrecedence(t *testing.T) {
 		t.Fatalf("marked section changed: %q", got)
 	}
 }
+
+func TestInitIgnoresKittMentionInDocsIndex(t *testing.T) {
+	testutil.IsolateHome(t)
+	root := testutil.NewRepo(t)
+	agents := "# Project\n\nProject notes without a tool mention.\n\n" +
+		templates.DocsStart + "\n- [Using kitt](.agents/docs/kitt-guide.md) — How we use kitt\n" + templates.DocsEnd + "\n"
+	testutil.WriteFile(t, filepath.Join(root, "AGENTS.md"), agents)
+	testutil.WriteFile(t, filepath.Join(root, ".agents", "docs", "kitt-guide.md"), "---\ntitle: Using kitt\ndescription: How we use kitt\n---\nGuide\n")
+
+	if err := Init(Options{Root: root, Sources: demoSources(t), Out: io.Discard}); err != nil {
+		t.Fatal(err)
+	}
+	got := readFile(t, filepath.Join(root, "AGENTS.md"))
+	if count := strings.Count(got, templates.KittStart); count != 1 {
+		t.Fatalf("kitt section count = %d, want 1:\n%s", count, got)
+	}
+	wantIndex := templates.DocsStart + "\n- [Using kitt](.agents/docs/kitt-guide.md) — How we use kitt\n" + templates.DocsEnd
+	if !strings.Contains(got, wantIndex) {
+		t.Fatalf("docs index changed or missing:\n%s", got)
+	}
+}

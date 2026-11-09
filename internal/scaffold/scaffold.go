@@ -168,9 +168,18 @@ func appendSection(text, section string) string {
 
 func mentionsKitt(text string) bool {
 	word := regexp.MustCompile(`(?i)\bkitt\b`)
+	inDocsIndex := false
 	for _, line := range strings.Split(text, "\n") {
 		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "<!-- kitt:") || strings.HasPrefix(line, "> **Setup pending.**") {
+		switch line {
+		case templates.DocsStart:
+			inDocsIndex = true
+			continue
+		case templates.DocsEnd:
+			inDocsIndex = false
+			continue
+		}
+		if inDocsIndex || strings.HasPrefix(line, "<!-- kitt:") || strings.HasPrefix(line, "> **Setup pending.**") {
 			continue
 		}
 		if word.MatchString(line) {

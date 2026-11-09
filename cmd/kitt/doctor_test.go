@@ -49,6 +49,15 @@ func TestRunDoctorDocsWithoutManifest(t *testing.T) {
 	}
 }
 
+func TestRunDoctorDocsOutsideProject(t *testing.T) {
+	testutil.IsolateHome(t)
+	root := t.TempDir()
+	t.Chdir(root)
+	wantErr := fmt.Sprintf("kitt doctor: no AGENTS.md or .agents/docs in %s, run from the project root\n", root)
+	doctorOutput(t, []string{"--docs"}, 1, "", wantErr)
+	doctorOutput(t, []string{"--docs", "--warn"}, 1, "", wantErr)
+}
+
 func TestRunDoctorDocsIgnoresModifiedSkill(t *testing.T) {
 	reviewProject(t)
 	t.Setenv("GITHUB_ACTIONS", "false")
@@ -56,6 +65,7 @@ func TestRunDoctorDocsIgnoresModifiedSkill(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	testutil.WriteFile(t, filepath.Join(root, "AGENTS.md"), "# Project\n")
 	if err := install.Add(install.Options{Root: root, Out: io.Discard}, "review@^1"); err != nil {
 		t.Fatal(err)
 	}
