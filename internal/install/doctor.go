@@ -77,9 +77,10 @@ func DoctorDocs(opts Options) (int, error) {
 		return 0, err
 	}
 	if !agentsExists {
-		_, err := os.Stat(filepath.Join(p.root, ".agents", "docs"))
-		if errors.Is(err, fs.ErrNotExist) {
-			return 0, fmt.Errorf("no AGENTS.md or .agents/docs in %s, run from the project root", p.root)
+		_, docsErr := os.Stat(filepath.Join(p.root, ".agents", "docs"))
+		_, manifestErr := os.Stat(filepath.Join(p.root, manifest.FileName))
+		if errors.Is(docsErr, fs.ErrNotExist) && errors.Is(manifestErr, fs.ErrNotExist) {
+			return 0, fmt.Errorf("no kitt.toml, AGENTS.md or .agents/docs in %s, run from the project root", p.root)
 		}
 	}
 	d := &doctor{p: p, out: outputOf(opts.Out)}
