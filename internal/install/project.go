@@ -118,10 +118,17 @@ func removeManagedClaudeMD(root string, out io.Writer) error {
 		return nil
 	}
 	path := filepath.Join(root, "CLAUDE.md")
-	data, err := os.ReadFile(path)
+	info, err := os.Lstat(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
+	if err != nil {
+		return fmt.Errorf("stat CLAUDE.md: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil
+	}
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("read CLAUDE.md: %w", err)
 	}

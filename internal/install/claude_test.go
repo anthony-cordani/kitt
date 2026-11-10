@@ -1,6 +1,7 @@
 package install_test
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -84,5 +85,49 @@ func TestRestoreCleansUpOnlyManagedClaudeMD(t *testing.T) {
 				t.Fatalf("second install mentioned CLAUDE.md: %q", out)
 			}
 		})
+	}
+}
+
+func TestRestoreKeepsSymlinkedManagedClaudeMD(t *testing.T) {
+	project, _ := standard(t)
+	path := filepath.Join(project, "CLAUDE.md")
+	target := filepath.Join(project, "claude-target")
+	testutil.WriteFile(t, target, "@AGENTS.md\n")
+	if err := os.Symlink(filepath.Base(target), path); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	testutil.WriteFile(t, filepath.Join(project, ".gitignore"), kittBlock(true))
+
+	mustRestore(t, project)
+
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatalf("Lstat CLAUDE.md: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("CLAUDE.md symlink was removed")
+	}
+	if got, err := os.Readlink(path); err != nil || got != filepath.Base(target) {
+		t.Fatalf("CLAUDE.md symlink = %q, %v", got, err)
+	}
+}
+
+func TestRestoreKeepsClaudeMDDirectory(t *testing.T) {
+	project, _ := standard(t)
+	path := filepath.Join(project, "CLAUDE.md")
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	testutil.WriteFile(t, filepath.Join(path, "keep"), "user data\n")
+	testutil.WriteFile(t, filepath.Join(project, ".gitignore"), kittBlock(true))
+
+	mustRestore(t, project)
+
+	info, err := os.Lstat(path)
+	if err != nil || !info.IsDir() {
+		t.Fatalf("CLAUDE.md directory was not kept: info=%v, err=%v", info, err)
+	}
+	if got := readText(t, filepath.Join(path, "keep")); got != "user data\n" {
+		t.Fatalf("CLAUDE.md directory contents = %q", got)
 	}
 }
