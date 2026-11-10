@@ -91,15 +91,18 @@ func TestDoctorOutdatedGitignore(t *testing.T) {
 	assertSingleProblem(t, project, "outdated: .gitignore kitt block (run kitt install)")
 }
 
-func TestDoctorMissingClaudeMD(t *testing.T) {
+func TestDoctorDoesNotRequireClaudeMD(t *testing.T) {
 	project, _ := standard(t)
 	testutil.WriteFile(t, filepath.Join(project, "AGENTS.md"), "# Agents\n")
 	mustAdd(t, project, "demo/review@^1")
-	if err := os.Remove(filepath.Join(project, "CLAUDE.md")); err != nil {
+	if err := os.RemoveAll(filepath.Join(project, "CLAUDE.md")); err != nil {
 		t.Fatal(err)
 	}
 
-	assertSingleProblem(t, project, "missing: CLAUDE.md (run kitt install)")
+	n, out := mustDoctor(t, project)
+	if n != 0 || out != "ok\n" {
+		t.Fatalf("Doctor = %d, output = %q", n, out)
+	}
 }
 
 func TestDoctorCustomClaudeMD(t *testing.T) {

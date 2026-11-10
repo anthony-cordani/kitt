@@ -195,9 +195,6 @@ func TestApplyTransactionRollbackAndRetry(t *testing.T) {
 					t.Fatal(err)
 				}
 				if !global {
-					if err := os.Remove(filepath.Join(p.root, "CLAUDE.md")); err != nil {
-						t.Fatal(err)
-					}
 					testutil.WriteFile(t, filepath.Join(p.root, ".agents", "docs", "new.md"), "---\ntitle: New doc\n---\n")
 				}
 				gitignore := filepath.Join(p.root, ".gitignore")
@@ -262,6 +259,53 @@ func TestApplyTransactionRollbackAndRetry(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestClaudeMDRemovalRollsBack(t *testing.T) {
+	p, opts, repo := transactionFixture(t, false)
+	transactionRelease(t, repo, "foo", "1.0.0")
+	claude := filepath.Join(p.root, "CLAUDE.md")
+	ignore := "# >>> kitt (managed by kitt, do not edit)\n/CLAUDE.md\n# <<< kitt\n"
+	testutil.WriteFile(t, claude, templates.ClaudeMD)
+	testutil.WriteFile(t, filepath.Join(p.root, ".gitignore"), ignore)
+	testutil.WriteFile(t, filepath.Join(p.root, "AGENTS.md"), "# Project\n")
+	before := transactionSnapshot(t, p)
+	var out bytes.Buffer
+	opts.Out = &out
+	fired := false
+	applyTestHook = func(step, path string) error {
+		if step == "manifest" {
+			fired = true
+			if _, err := os.Lstat(claude); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("CLAUDE.md was not removed before failure: %v", err)
+			}
+			data, err := os.ReadFile(filepath.Join(p.root, ".gitignore"))
+			if err != nil || strings.Contains(string(data), "/CLAUDE.md") {
+				t.Fatalf("gitignore was not rewritten before failure: %q, %v", data, err)
+			}
+			return errors.New("manifest failure after cleanup")
+		}
+		return nil
+	}
+	t.Cleanup(func() { applyTestHook = nil })
+	err := Add(opts, "foo")
+	applyTestHook = nil
+	var pe *dependency.PlanError
+	if !fired || err == nil || !errors.As(err, &pe) || !pe.ManagedStateUntouched {
+		t.Fatalf("rollback: %v (hook fired: %t)", err, fired)
+	}
+	if after := transactionSnapshot(t, p); !reflect.DeepEqual(before, after) {
+		t.Fatalf("rollback changed managed state:\nbefore %v\nafter %v", before, after)
+	}
+	if strings.Contains(out.String(), "removed CLAUDE.md") {
+		t.Fatalf("reported rolled-back deletion: %q", out.String())
+	}
+	if err := Add(opts, "foo"); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if _, err := os.Lstat(claude); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("retry did not remove CLAUDE.md: %v", err)
 	}
 }
 

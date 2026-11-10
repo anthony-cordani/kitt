@@ -126,7 +126,7 @@ func TestRunDoctorExitCodes(t *testing.T) {
 		}
 	})
 	t.Run("problem", func(t *testing.T) {
-		if err := os.Remove(filepath.Join(project, "CLAUDE.md")); err != nil {
+		if err := os.Remove(filepath.Join(project, ".gitignore")); err != nil {
 			t.Fatal(err)
 		}
 		t.Chdir(project)

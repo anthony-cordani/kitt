@@ -52,9 +52,10 @@ A teammate who clones the project runs `kitt init` once, which installs the git 
 | `.agents/docs/` | yes | Project memory: one Markdown file per non-obvious topic, in subfolders if you want |
 | `.agents/skills/` | no | Installed skills (restored by `kitt install`) |
 | `.claude/skills/<name>` | no | Links for Claude Code, one per skill |
-| `CLAUDE.md` | no | `@AGENTS.md`, so Claude Code reads the same file |
 | `.gitignore` | yes | A block managed by kitt for the unversioned paths |
 | `.git/hooks/post-merge`, `post-checkout`, `pre-push` | no | Run `kitt install` after a pull or a checkout; warn about stale project docs before a push without ever blocking it |
+
+kitt no longer creates CLAUDE.md: Claude Code reads AGENTS.md. `kitt install` removes the `@AGENTS.md` CLAUDE.md it created in earlier versions.
 
 kitt never overwrites a file it did not create. On a project that already has an `AGENTS.md`, `kitt init` appends what is missing: the project memory section and the kitt section. If `AGENTS.md` already mentions kitt, it leaves that text alone and says so. The Skills section written by an older kitt is replaced in place. Existing git hooks (git-lfs, husky through `core.hooksPath`) are kept: kitt appends its own block.
 

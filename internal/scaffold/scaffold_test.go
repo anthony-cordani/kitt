@@ -58,12 +58,8 @@ func TestInitCreatesProjectFiles(t *testing.T) {
 	requireTemplate(t, repo, "RULES.md", "files/RULES.md")
 	requireTemplate(t, repo, ".agents/docs/README.md", "files/docs/README.md")
 
-	claude, err := os.ReadFile(filepath.Join(repo, "CLAUDE.md"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(claude) != templates.ClaudeMD {
-		t.Fatalf("CLAUDE.md = %q, want %q", claude, templates.ClaudeMD)
+	if _, err := os.Lstat(filepath.Join(repo, "CLAUDE.md")); !os.IsNotExist(err) {
+		t.Fatalf("Init created CLAUDE.md: %v", err)
 	}
 
 	for _, name := range []string{"post-merge", "post-checkout", "pre-push"} {
@@ -87,6 +83,24 @@ func TestInitCreatesProjectFiles(t *testing.T) {
 	lines := outputLines(buf.String())
 	if len(lines) == 0 || lines[len(lines)-1] != nextLine {
 		t.Fatalf("output does not end with the next line:\n%s", buf.String())
+	}
+}
+
+func TestInitDoesNotCreateClaudeMD(t *testing.T) {
+	testutil.IsolateHome(t)
+	repo := testutil.NewRepo(t)
+	if err := Init(Options{Root: repo, Sources: demoSources(t), Out: io.Discard}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(repo, "CLAUDE.md")); !os.IsNotExist(err) {
+		t.Fatalf("Init created CLAUDE.md: %v", err)
+	}
+	ignore, err := os.ReadFile(filepath.Join(repo, ".gitignore"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(ignore), "/CLAUDE.md") {
+		t.Fatalf("Init added /CLAUDE.md to .gitignore:\n%s", ignore)
 	}
 }
 
