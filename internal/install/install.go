@@ -377,13 +377,13 @@ func pruneSkills(state *installedState, managed []string, out io.Writer) error {
 	return nil
 }
 
-func writeGitignore(root string, agentsExists bool) error {
+func writeGitignore(root string) error {
 	path := filepath.Join(root, ".gitignore")
 	data, err := os.ReadFile(path)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("read .gitignore: %w", err)
 	}
-	updated, changed := mergeGitignore(string(data), agentsExists)
+	updated, changed := mergeGitignore(string(data))
 	if !changed {
 		return nil
 	}
@@ -393,8 +393,8 @@ func writeGitignore(root string, agentsExists bool) error {
 	return nil
 }
 
-func mergeGitignore(existing string, agentsExists bool) (string, bool) {
-	block := renderGitignore(agentsExists)
+func mergeGitignore(existing string) (string, bool) {
+	block := renderGitignore()
 	if start, end, ok := findManagedBlock(existing); ok {
 		updated := existing[:start] + block + existing[end:]
 		return updated, updated != existing
@@ -410,15 +410,12 @@ func mergeGitignore(existing string, agentsExists bool) (string, bool) {
 	return updated, updated != existing
 }
 
-func renderGitignore(agentsExists bool) string {
+func renderGitignore() string {
 	var b strings.Builder
 	b.WriteString(gitignoreStart)
 	b.WriteByte('\n')
 	b.WriteString("/.agents/skills/\n")
 	b.WriteString("/.claude/skills/\n")
-	if agentsExists {
-		b.WriteString("/CLAUDE.md\n")
-	}
 	b.WriteString(gitignoreEnd)
 	b.WriteByte('\n')
 	return b.String()

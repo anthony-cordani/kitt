@@ -43,10 +43,11 @@ func finish(p paths, names []string, prune bool, out io.Writer) error {
 		names = append(names, templates.BootstrapSkill)
 		sort.Strings(names)
 	}
+	// Check ownership before writeGitignore replaces the old managed block.
+	if err := removeManagedClaudeMD(p.root, out); err != nil {
+		return err
+	}
 	if agentsExists {
-		if err := syncClaudeMD(p.root, out); err != nil {
-			return err
-		}
 		if err := syncDocsIndex(p.root, agentsPath, string(agents), out); err != nil {
 			return err
 		}
@@ -59,7 +60,7 @@ func finish(p paths, names []string, prune bool, out io.Writer) error {
 	if err := syncLinks(p, names, previouslyInstalled, out); err != nil {
 		return err
 	}
-	return writeGitignore(p.root, agentsExists)
+	return writeGitignore(p.root)
 }
 
 func syncBootstrap(p paths, active bool) error {
@@ -107,19 +108,37 @@ func syncBootstrap(p paths, active bool) error {
 	return p.installed.add(templates.BootstrapSkill)
 }
 
-func syncClaudeMD(root string, out io.Writer) error {
+func removeManagedClaudeMD(root string, out io.Writer) error {
+	ignore, err := os.ReadFile(filepath.Join(root, ".gitignore"))
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("read .gitignore: %w", err)
+	}
+	start, end, ok := findManagedBlock(string(ignore))
+	if !ok || exactLineIndex(string(ignore[start:end]), "/CLAUDE.md") < 0 {
+		return nil
+	}
 	path := filepath.Join(root, "CLAUDE.md")
-	_, err := os.ReadFile(path)
+	info, err := os.Lstat(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		if err := os.WriteFile(path, []byte(templates.ClaudeMD), 0o644); err != nil {
-			return fmt.Errorf("write CLAUDE.md: %w", err)
-		}
-		fmt.Fprintln(out, "created CLAUDE.md")
 		return nil
 	}
 	if err != nil {
+		return fmt.Errorf("stat CLAUDE.md: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
 		return fmt.Errorf("read CLAUDE.md: %w", err)
 	}
+	if string(data) != templates.ClaudeMD {
+		return nil
+	}
+	if err := os.Remove(path); err != nil {
+		return fmt.Errorf("remove CLAUDE.md: %w", err)
+	}
+	fmt.Fprintln(out, "removed CLAUDE.md (Claude Code reads AGENTS.md)")
 	return nil
 }
 

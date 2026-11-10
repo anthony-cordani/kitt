@@ -170,15 +170,8 @@ func (d *doctor) links(names []string) error {
 }
 
 func (d *doctor) project(agents string, agentsExists bool) error {
-	claudeExists, err := claudeState(d.p.root)
-	if err != nil {
+	if err := d.gitignore(); err != nil {
 		return err
-	}
-	if err := d.gitignore(agentsExists); err != nil {
-		return err
-	}
-	if agentsExists && !claudeExists {
-		d.line("missing: CLAUDE.md (run kitt install)")
 	}
 	if agentsExists && bootstrapActive(agents) {
 		d.line("pending: AGENTS.md setup (ask your AI assistant to run the kitt-bootstrap skill)")
@@ -189,7 +182,7 @@ func (d *doctor) project(agents string, agentsExists bool) error {
 	return d.staleDocs()
 }
 
-func (d *doctor) gitignore(agentsExists bool) error {
+func (d *doctor) gitignore() error {
 	data, err := os.ReadFile(filepath.Join(d.p.root, ".gitignore"))
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("read .gitignore: %w", err)
@@ -198,7 +191,7 @@ func (d *doctor) gitignore(agentsExists bool) error {
 	if start, end, ok := findManagedBlock(string(data)); ok {
 		current = string(data)[start:end]
 	}
-	if current != renderGitignore(agentsExists) {
+	if current != renderGitignore() {
 		d.line("outdated: .gitignore kitt block (run kitt install)")
 	}
 	return nil
@@ -307,17 +300,6 @@ func readAgents(root string) (string, bool, error) {
 		return "", false, fmt.Errorf("read AGENTS.md: %w", err)
 	}
 	return string(data), true, nil
-}
-
-func claudeState(root string) (bool, error) {
-	_, err := os.ReadFile(filepath.Join(root, "CLAUDE.md"))
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return false, nil
-		}
-		return false, fmt.Errorf("read CLAUDE.md: %w", err)
-	}
-	return true, nil
 }
 
 func skillLink(global bool, name string) string {

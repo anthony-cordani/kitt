@@ -280,10 +280,8 @@ func TestProjectBootstrapInstallAndRemoval(t *testing.T) {
 		t.Fatal("kitt-bootstrap was not installed")
 	}
 	assertLinkResolves(t, claudePath(project, "kitt-bootstrap"), boot)
-	if readText(t, filepath.Join(project, "CLAUDE.md")) != "@AGENTS.md\n" {
-		t.Fatalf("CLAUDE.md = %q", readText(t, filepath.Join(project, "CLAUDE.md")))
-	}
-	block := kittBlock(true)
+	assertMissing(t, filepath.Join(project, "CLAUDE.md"))
+	block := kittBlock(false)
 	if readText(t, filepath.Join(project, ".gitignore")) != block {
 		t.Fatalf("gitignore =\n%s\nwant\n%s", readText(t, filepath.Join(project, ".gitignore")), block)
 	}
@@ -293,7 +291,7 @@ func TestProjectBootstrapInstallAndRemoval(t *testing.T) {
 
 	assertMissing(t, boot)
 	assertMissing(t, claudePath(project, "kitt-bootstrap"))
-	block = kittBlock(true)
+	block = kittBlock(false)
 	if readText(t, filepath.Join(project, ".gitignore")) != block {
 		t.Fatalf("gitignore after removal =\n%s\nwant\n%s", readText(t, filepath.Join(project, ".gitignore")), block)
 	}
@@ -314,11 +312,11 @@ func TestExistingClaudeMDIsUntouched(t *testing.T) {
 		t.Fatalf("CLAUDE.md = %q", readText(t, filepath.Join(project, "CLAUDE.md")))
 	}
 	got := readText(t, filepath.Join(project, ".gitignore"))
-	if got != kittBlock(true) {
-		t.Fatalf("gitignore =\n%s\nwant\n%s", got, kittBlock(true))
+	if got != kittBlock(false) {
+		t.Fatalf("gitignore =\n%s\nwant\n%s", got, kittBlock(false))
 	}
-	if !strings.Contains(got, "/CLAUDE.md") {
-		t.Fatalf("CLAUDE.md is not in the block:\n%s", got)
+	if strings.Contains(got, "/CLAUDE.md") {
+		t.Fatalf("CLAUDE.md is in the block:\n%s", got)
 	}
 }
 
@@ -337,8 +335,8 @@ func TestGitignoreByteIdenticalForCustomAndTemplateClaudeMD(t *testing.T) {
 	got1 := readText(t, filepath.Join(p1, ".gitignore"))
 	got2 := readText(t, filepath.Join(p2, ".gitignore"))
 
-	if !strings.Contains(got1, "/CLAUDE.md\n") {
-		t.Fatalf("custom project .gitignore missing /CLAUDE.md:\n%s", got1)
+	if strings.Contains(got1, "/CLAUDE.md\n") {
+		t.Fatalf("custom project .gitignore contains /CLAUDE.md:\n%s", got1)
 	}
 	if got1 != got2 {
 		t.Fatalf(".gitignore not byte-identical between machines:\nmachine 1 (custom):\n%s\nmachine 2 (template):\n%s", got1, got2)
@@ -410,7 +408,7 @@ func TestGitignoreMigrationFromOldBlock(t *testing.T) {
 
 	mustRestore(t, project)
 
-	want := prefix + kittBlock(true) + suffix
+	want := prefix + kittBlock(false) + suffix
 	if got := readText(t, path); got != want {
 		t.Fatalf("gitignore =\n%s\nwant\n%s", got, want)
 	}

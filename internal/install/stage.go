@@ -140,7 +140,11 @@ func preflightInstall(p paths, plan *dependency.Plan) error {
 			names = append(names, templates.BootstrapSkill)
 		}
 		for _, name := range []string{"CLAUDE.md", ".gitignore"} {
-			if _, err := os.ReadFile(filepath.Join(p.root, name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			path := filepath.Join(p.root, name)
+			if info, err := os.Lstat(path); err == nil && info.IsDir() {
+				continue
+			}
+			if _, err := os.ReadFile(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 				return fmt.Errorf("read %s: %w", name, err)
 			}
 		}
@@ -347,6 +351,7 @@ func newApplyTransaction(p paths) (*applyTransaction, error) {
 	}
 	seen := map[string]bool{}
 	for _, path := range files {
+		originalPath := path
 		// Finish writes through project-file symlinks. Preserve both each link
 		// and its referent so rollback also restores the bytes reached through it.
 		for !seen[path] {
@@ -354,6 +359,11 @@ func newApplyTransaction(p paths) (*applyTransaction, error) {
 			f := savedFile{path: path}
 			info, err := os.Lstat(path)
 			if err == nil {
+				// Directory destinations are user-owned and are not written by
+				// finish. Keep symlink referent handling unchanged.
+				if path == originalPath && info.IsDir() {
+					break
+				}
 				f.exists, f.mode = true, info.Mode()
 				if info.Mode()&os.ModeSymlink != 0 {
 					f.target, err = os.Readlink(path)
