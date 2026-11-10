@@ -415,7 +415,7 @@ func planningManifest(p paths, m *manifest.Manifest, access *installSources, tar
 			return nil, err
 		}
 	}
-	current := &manifest.Manifest{Sources: maps.Clone(m.Sources), Skills: map[string]*manifest.Skill{}}
+	current := &manifest.Manifest{Sources: maps.Clone(m.Sources), Skills: map[string]*manifest.Skill{}, Defaults: m.Defaults}
 	for _, name := range sortedNames(m.Skills) {
 		s := m.Skills[name]
 		if s == nil {
@@ -665,7 +665,7 @@ func pinnedRequirements(p paths, s *manifest.Skill, name string, access *install
 }
 
 func plannedManifest(m *manifest.Manifest, plan *dependency.Plan, staged map[string]stagedSkill, unknown map[string]bool) *manifest.Manifest {
-	next := &manifest.Manifest{Sources: maps.Clone(m.Sources), Skills: map[string]*manifest.Skill{}}
+	next := &manifest.Manifest{Sources: maps.Clone(m.Sources), Skills: map[string]*manifest.Skill{}, Defaults: m.Defaults}
 	snapshots := false
 	for _, n := range plan.Nodes {
 		if unknown[n.Name] {

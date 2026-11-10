@@ -21,9 +21,10 @@ import (
 
 // Options configures kitt init.
 type Options struct {
-	Root    string            // project root
-	Sources map[string]string // alias -> URL to add to kitt.toml
-	Out     io.Writer         // progress messages
+	Root       string            // project root
+	Sources    map[string]string // alias -> URL to add to kitt.toml
+	Out        io.Writer         // progress messages
+	NoDefaults bool              // skip source default skills
 }
 
 // Init writes the missing project files, installs the git hooks, then installs the skills.
@@ -52,6 +53,11 @@ func Init(opts Options) error {
 	}
 	if err := install.Restore(install.Options{Root: opts.Root, Out: opts.Out}); err != nil {
 		return fmt.Errorf("install skills: %w", err)
+	}
+	if !opts.NoDefaults {
+		if err := install.AddDefaults(install.Options{Root: opts.Root, Out: opts.Out}); err != nil {
+			return fmt.Errorf("default skills: %w", err)
+		}
 	}
 	if createdAgents {
 		fmt.Fprintln(opts.Out, "next: ask your AI assistant to set up the project (kitt-bootstrap skill)")

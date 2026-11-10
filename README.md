@@ -42,6 +42,23 @@ Then open your AI assistant in the project and ask it to set up the project. It 
 
 A teammate who clones the project runs `kitt init` once, which installs the git hooks and the skills. After that, the hook keeps skills in sync on every pull and checkout.
 
+### Default skills
+
+A source can declare default skills in `kitt-defaults.toml` at its root on its default branch. List names without versions:
+
+```toml
+skills = ["adr", "code-review"]
+```
+
+Only `kitt init` adds these defaults, using the same version constraint and dependency installation as `kitt install <alias>/<skill>`. Re-run `kitt init` to pick up defaults a source added later. Already pinned skills are left untouched, regardless of their source or constraint. Source errors produce warnings and init continues.
+
+Use `kitt init --no-defaults` to skip defaults for one run. To skip specific defaults on every run, add this to the project's `kitt.toml`:
+
+```toml
+[defaults]
+skip = ["nexus/adr"]
+```
+
 ## What kitt writes in a project
 
 | Path | Versioned | Role |
@@ -63,7 +80,7 @@ kitt never overwrites a file it did not create. On a project that already has an
 
 | Command | What it does |
 |---|---|
-| `kitt init [--source alias=url]…` | Writes the missing project files, installs the git hooks, installs the skills. Without `--source`, asks for the skills repositories and checks that git can reach them. |
+| `kitt init [--source alias=url]… [--no-defaults]` | Writes the missing project files, installs the git hooks, installs the skills. Without `--source`, asks for the skills repositories and checks that git can reach them. |
 | `kitt install` | Restores every skill exactly as pinned in `kitt.toml`. Fast and offline when nothing changed. |
 | `kitt install [source/]skill[@constraint]` | Adds a skill and pins it. The source can be omitted when only one source has a skill of that name. |
 | `kitt remote [-g]` | Lists configured skill sources, sorted by alias. |

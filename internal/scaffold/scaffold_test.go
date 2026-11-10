@@ -340,7 +340,10 @@ func TestPullRunsHookAndInstallsSkill(t *testing.T) {
 
 func demoSources(t *testing.T) map[string]string {
 	t.Helper()
-	return map[string]string{"demo": testutil.URL(testutil.NewRepo(t))}
+	repo := testutil.NewRepo(t)
+	testutil.WriteFile(t, filepath.Join(repo, "README.md"), "Test source.\n")
+	testutil.Commit(t, repo, "initial source")
+	return map[string]string{"demo": testutil.URL(repo)}
 }
 
 func requireTemplate(t *testing.T, root, name, template string) {
