@@ -32,11 +32,12 @@ func initCmd(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	fs.Usage = func() {
-		fmt.Fprintln(stderr, "Usage: kitt init [--source alias=url]...")
+		fmt.Fprintln(stderr, "Usage: kitt init [--source alias=url]... [--no-defaults]")
 		fs.PrintDefaults()
 	}
 	sources := sourceFlags{}
 	fs.Var(sources, "source", "skills repository as alias=url (repeatable)")
+	noDefaults := fs.Bool("no-defaults", false, "do not add the default skills of the sources")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -58,7 +59,7 @@ func initCmd(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 	}
-	if err := scaffold.Init(scaffold.Options{Root: root, Sources: sources, Out: stdout}); err != nil {
+	if err := scaffold.Init(scaffold.Options{Root: root, Sources: sources, Out: stdout, NoDefaults: *noDefaults}); err != nil {
 		fmt.Fprintf(stderr, "kitt init: %v\n", err)
 		return 1
 	}

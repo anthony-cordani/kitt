@@ -16,8 +16,14 @@ const FileName = "kitt.toml"
 
 // Manifest is the content of a kitt.toml file.
 type Manifest struct {
-	Sources map[string]string `toml:"sources"`
-	Skills  map[string]*Skill `toml:"skills"`
+	Sources  map[string]string `toml:"sources"`
+	Skills   map[string]*Skill `toml:"skills"`
+	Defaults *Defaults         `toml:"defaults,omitempty"`
+}
+
+// Defaults configures which source defaults the project skips.
+type Defaults struct {
+	Skip []string `toml:"skip,omitempty"`
 }
 
 // Skill is one skill entry of the manifest.

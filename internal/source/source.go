@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/BurntSushi/toml"
 	"golang.org/x/mod/semver"
 
 	kskill "github.com/anthony-cordani/kitt/internal/skill"
@@ -217,6 +218,36 @@ func (s *Source) Skills() ([]string, error) {
 		names = []string{}
 	}
 	return names, nil
+}
+
+// Defaults returns the default skill names declared on the default branch.
+func (s *Source) Defaults() ([]string, error) {
+	if _, err := runGit("-C", s.dir, "rev-parse", "--verify", "--quiet", "HEAD^{commit}"); err != nil {
+		return nil, nil
+	}
+	const file = "kitt-defaults.toml"
+	if _, err := runGit("-C", s.dir, "cat-file", "-e", "HEAD:"+file); err != nil {
+		// An absent path is optional; a broken repository is still an error.
+		out, treeErr := runGit("-C", s.dir, "ls-tree", "--name-only", "HEAD", "--", file)
+		if treeErr != nil {
+			return nil, treeErr
+		}
+		if len(out) == 0 {
+			return nil, nil
+		}
+		return nil, err
+	}
+	out, err := runGit("-C", s.dir, "show", "HEAD:"+file)
+	if err != nil {
+		return nil, err
+	}
+	var defaults struct {
+		Skills []string `toml:"skills"`
+	}
+	if _, err := toml.Decode(string(out), &defaults); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", file, err)
+	}
+	return defaults.Skills, nil
 }
 
 // Diff returns the git diff of a skill directory between two commits.
