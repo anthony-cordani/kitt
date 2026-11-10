@@ -79,7 +79,7 @@ kitt never overwrites a file it did not create. On a project that already has an
 
 | Command | What it does |
 |---|---|
-| `kitt init [--source alias=url]…` | Writes the missing project files, installs the git hooks, installs the skills. Without `--source`, asks for the skills repositories and checks that git can reach them. |
+| `kitt init [--source alias=url]… [--no-defaults]` | Writes the missing project files, installs the git hooks, installs the skills. Without `--source`, asks for the skills repositories and checks that git can reach them. |
 | `kitt install` | Restores every skill exactly as pinned in `kitt.toml`. Fast and offline when nothing changed. |
 | `kitt install [source/]skill[@constraint]` | Adds a skill and pins it. The source can be omitted when only one source has a skill of that name. |
 | `kitt remote [-g]` | Lists configured skill sources, sorted by alias. |

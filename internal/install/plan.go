@@ -415,7 +415,7 @@ func planningManifest(p paths, m *manifest.Manifest, access *installSources, tar
 			return nil, err
 		}
 	}
-	current := &manifest.Manifest{Sources: maps.Clone(m.Sources), Skills: map[string]*manifest.Skill{}}
+	current := &manifest.Manifest{Sources: maps.Clone(m.Sources), Skills: map[string]*manifest.Skill{}, Defaults: m.Defaults}
 	for _, name := range sortedNames(m.Skills) {
 		s := m.Skills[name]
 		if s == nil {

@@ -222,6 +222,9 @@ func (s *Source) Skills() ([]string, error) {
 
 // Defaults returns the default skill names declared on the default branch.
 func (s *Source) Defaults() ([]string, error) {
+	if _, err := runGit("-C", s.dir, "rev-parse", "--verify", "--quiet", "HEAD^{commit}"); err != nil {
+		return nil, nil
+	}
 	const file = "kitt-defaults.toml"
 	if _, err := runGit("-C", s.dir, "cat-file", "-e", "HEAD:"+file); err != nil {
 		// An absent path is optional; a broken repository is still an error.

@@ -37,10 +37,14 @@ func TestDefaults(t *testing.T) {
 	}
 }
 
-func TestDefaultsBrokenHEADIsError(t *testing.T) {
+func TestDefaultsWithoutCommit(t *testing.T) {
 	testutil.IsolateHome(t)
 	s := openSource(t, "demo", testutil.NewRepo(t))
-	if _, err := s.Defaults(); err == nil {
-		t.Fatal("Defaults with no HEAD succeeded")
+	if err := s.Fetch(); err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	got, err := s.Defaults()
+	if got != nil || err != nil {
+		t.Fatalf("Defaults = %q, %v; want nil, nil", got, err)
 	}
 }
